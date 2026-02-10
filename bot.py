@@ -11,8 +11,11 @@ TOKEN = os.environ.get('TELEGRAM_TOKEN')
 CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 
 async def send_smart_report():
+    # 한국 시간 설정을 위해 현재 시간에서 9시간을 더합니다 (선택 사항)
     now = datetime.now()
-    if now.weekday() == 6: return # 일요일 휴무
+    
+    # [테스트를 위해 휴무 체크 주석 처리]
+    # if now.weekday() == 6: return # 일요일 휴무
 
     # 기준일 설정 (월요일이면 금요일 데이터, 그 외엔 전일 데이터)
     target_date = now - timedelta(days=3 if now.weekday() == 0 else 1)
@@ -20,9 +23,12 @@ async def send_smart_report():
     report_type = "주간" if now.weekday() == 5 else "일일"
 
     try:
+        print(f"--- 데이터 수집 시작: {target_date_str} ---")
         # 1. 데이터 수집
         df = fdr.StockListing('KRX')
-        if df is None or df.empty: return
+        if df is None or df.empty: 
+            print("데이터가 없습니다.")
+            return
 
         # 2. 컬럼 이름 찾기 (FinanceDataReader 버전에 대응)
         cols = df.columns.tolist()
