@@ -14,7 +14,7 @@ jobs:
         with:
           python-version: '3.10'
       - name: 라이브러리 설치
-        run: pip install -r requirements.txt  # <--- 이 부분에 -r 이 꼭 있어야 해요!
+        run: pip install -r requirements.txt
       - name: 봇 실행
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
