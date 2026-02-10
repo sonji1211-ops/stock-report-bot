@@ -1,0 +1,5 @@
+requirements.txt
+pandas
+FinanceDataReader
+openpyxl
+python-telegram-bot
