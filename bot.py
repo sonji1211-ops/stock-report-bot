@@ -6,43 +6,40 @@ import asyncio
 from telegram import Bot
 from openpyxl.styles import Alignment, PatternFill
 
-# [설정] 깃허브 Secrets에서 정보를 가져오거나, 직접 입력할 수 있습니다.
-# 보안을 위해 Secrets 사용을 권장하지만, 테스트용으로 직접 입력하셔도 됩니다.
+# [설정] 직접 입력 모드 (가장 확실함)
 TOKEN = "8574978661:AAF5SXIgfpJlnAfN5ccSk0tJek_uSlCMBBo"
-CHAT_ID = "8564327930"
+CHAT_ID = "8564327930" 
 
 async def send_smart_report():
-    now = datetime.now()
-    # 테스트를 위해 일요일 휴무 코드는 주석 처리해두었습니다.
-    # if now.weekday() == 6: return 
-
-    # 기준일 설정 (월요일이면 금요일 데이터, 그 외엔 전일 데이터)
-    target_date = now - timedelta(days=3 if now.weekday() == 0 else 1)
-    target_date_str = target_date.strftime('%Y-%m-%d')
+    # 1. 한국 시간(KST)으로 기준 설정
+    # 깃허브 서버(UTC)보다 9시간 빠른 한국 시간으로 날짜를 잡습니다.
+    now = datetime.utcnow() + timedelta(hours=9)
+    target_date_str = now.strftime('%Y-%m-%d')
+    
+    # 보고서 타입 (오늘 요일에 따라 자동 결정)
     report_type = "주간" if now.weekday() == 5 else "일일"
 
     try:
-        print(f"--- 데이터 수집 및 분석 시작 ({target_date_str}) ---")
+        print(f"--- 분석 시작: {target_date_str} (한국시간 기준) ---")
         
-        # 1. 데이터 수집
+        # 2. 데이터 수집 (KRX 전체 종목)
         df = fdr.StockListing('KRX')
         if df is None or df.empty:
-            print("데이터를 불러오지 못했습니다.")
+            print("데이터를 가져오는 데 실패했습니다.")
             return
 
-        # 2. 컬럼 이름 유연하게 찾기
+        # 3. 필수 컬럼 정리 및 숫자 변환
         cols = df.columns.tolist()
         chg_amt_col = next((c for c in ['Change', 'Changes', 'ChgAmt'] if c in cols), None)
         cap_col = next((c for c in ['Marcap', 'Amount', 'MarketCap'] if c in cols), cols[-1])
 
-        # 3. 데이터 숫자 변환
         needed_cols = ['Open', 'Close', 'Volume', cap_col]
         if chg_amt_col: needed_cols.append(chg_amt_col)
         for c in needed_cols:
             if c in df.columns:
                 df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
         
-        # 4. 전일 대비 등락률 계산
+        # 4. 등락률 계산
         if chg_amt_col:
             def calculate_ratio(row):
                 prev_close = row['Close'] - row[chg_amt_col]
@@ -53,7 +50,7 @@ async def send_smart_report():
             df['Calculated_Ratio'] = pd.to_numeric(df[ratio_col], errors='coerce').fillna(0)
             if df['Calculated_Ratio'].max() > 100: df['Calculated_Ratio'] /= 100
 
-        # 5. 한글 매핑 및 필터링
+        # 5. 한글 매핑 및 필터링 (상승/하락 5% 기준)
         h_map = {
             'Code': '종목코드', 'Name': '종목명', 'Market': '시장',
             'Open': '시가', 'Close': '종가(현재가)', 
@@ -78,7 +75,7 @@ async def send_smart_report():
             '코스닥_하락': process_data('KOSDAQ', False)
         }
 
-        # 6. 엑셀 저장 및 색상 스타일 적용
+        # 6. 엑셀 파일 생성 및 꾸미기
         file_name = f"{target_date_str}_{report_type}_리포트.xlsx"
         
         fill_yellow = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
@@ -99,40 +96,41 @@ async def send_smart_report():
                     ratio_val = abs(float(val)) if val is not None else 0
                     name_cell = ws.cell(row=row, column=name_idx)
 
-                    # 등락률에 따른 종목명 칸 색상 지정
+                    # 등락률별 색상 지정
                     if ratio_val >= 30: name_cell.fill = fill_red
                     elif ratio_val >= 20: name_cell.fill = fill_orange
                     elif ratio_val >= 10: name_cell.fill = fill_yellow
 
-                    # 전행 정렬 및 숫자 서식 적용
                     for col in range(1, len(col_list) + 1):
                         cell = ws.cell(row=row, column=col)
                         cell.alignment = Alignment(horizontal='center', vertical='center')
                         
-                        header_name = col_list[col-1]
+                        # 천단위 콤마 서식
                         if isinstance(cell.value, (int, float)):
+                            header_name = col_list[col-1]
                             if header_name in ['시가', '종가(현재가)', '거래량']:
                                 cell.number_format = '#,##0'
                             elif header_name == '전일대비(%)':
                                 cell.number_format = '0.00'
 
-                # 칸 너비 자동 조절 (약 20)
                 for i in range(1, len(col_list) + 1):
                     ws.column_dimensions[chr(64+i)].width = 20
 
         # 7. 텔레그램 전송
         bot = Bot(token=TOKEN)
         async with bot:
-            msg = (f"📅 {target_date_str} 리포트\n"
-                   f"🚀 상승(5%↑): {len(sheets_data['코스피_상승'])+len(sheets_data['코스닥_상승'])} / 📉 하락(5%↓): {len(sheets_data['코스피_하락'])+len(sheets_data['코스닥_하락'])}\n"
-                   f"🎨 색상 안내: 10%(🟡), 20%(🟠), 30%(🔴)")
+            msg = (f"📅 {target_date_str} 리포트 배달완료!\n\n"
+                   f"📈 상승(5%↑): {len(sheets_data['코스피_상승'])+len(sheets_data['코스닥_상승'])}개\n"
+                   f"📉 하락(5%↓): {len(sheets_data['코스피_하락'])+len(sheets_data['코스닥_하락'])}개\n\n"
+                   f"💡 엑셀에서 종목명 색깔을 확인하세요!\n"
+                   f"(🟡10%↑, 🟠20%↑, 🔴30%↑)")
             with open(file_name, 'rb') as f:
                 await bot.send_document(chat_id=CHAT_ID, document=f, caption=msg)
         print(f"--- [성공] {file_name} 전송 완료 ---")
 
     except Exception as e:
         import traceback
-        print(f"오류 발생 상세:\n{traceback.format_exc()}")
+        print(f"오류 발생:\n{traceback.format_exc()}")
 
 if __name__ == "__main__":
     asyncio.run(send_smart_report())
