@@ -8,8 +8,8 @@ from openpyxl.styles import Alignment, PatternFill
 
 # [설정] 깃허브 Secrets에서 정보를 가져오거나, 직접 입력할 수 있습니다.
 # 보안을 위해 Secrets 사용을 권장하지만, 테스트용으로 직접 입력하셔도 됩니다.
-TOKEN = os.environ.get('TELEGRAM_TOKEN', "8574978661:AAF5SXIgfpJlnAfN5ccSk0tJek_uSlCMBBo")
-CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', "8564327930")
+TOKEN = "8574978661:AAF5SXIgfpJlnAfN5ccSk0tJek_uSlCMBBo"
+CHAT_ID = "8564327930"
 
 async def send_smart_report():
     now = datetime.now()
