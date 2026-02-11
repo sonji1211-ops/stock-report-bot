@@ -1,21 +1,28 @@
-name: 주식 리포트 자동 발송
+name: 주식 리포트 통합 발송
+
 on:
+  schedule:
+    - cron: '0 22 * * *'  # 한국 시간 오전 7:00 (미국장 마감 후)
+    - cron: '30 23 * * *' # 한국 시간 오전 8:30 (한국장 시작 전)
   workflow_dispatch:
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      - name: 파이썬 설치
-        uses: actions/setup-python@v4
+      - uses: actions/setup-python@v4
         with:
-          python-version: '3.11' # 버전을 3.11로 올렸어요!
+          python-version: '3.11'
       - name: 라이브러리 설치
-        run: |
-          python -m pip install --upgrade pip
-          pip install pandas finance-datareader openpyxl python-telegram-bot
-      - name: 봇 실행
-        env:
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: pip install pandas finance-datareader openpyxl python-telegram-bot
+      
+      - name: 미국 증시 리포트 실행 (오전 7시)
+        # 한국 시간 7시(UTC 22시) 근처일 때만 실행
+        if: github.event.schedule == '0 22 * * *' || github.event_name == 'workflow_dispatch'
+        run: python us_bot.py
+
+      - name: 한국 증시 리포트 실행 (오전 8시 30분)
+        # 한국 시간 8시 30분(UTC 23시 30분) 근처일 때만 실행
+        if: github.event.schedule == '30 23 * * *' || github.event_name == 'workflow_dispatch'
         run: python bot.py
