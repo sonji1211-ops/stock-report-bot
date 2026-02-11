@@ -10,105 +10,87 @@ from openpyxl.styles import Alignment, PatternFill, Font
 TOKEN = "8574978661:AAF5SXIgfpJlnAfN5ccSk0tJek_uSlCMBBo"
 CHAT_ID = "8564327930" 
 
-async def send_us_smart_report():
+async def send_us_major_report():
     now = datetime.utcnow() + timedelta(hours=9)
     target_date_str = now.strftime('%Y-%m-%d')
 
-    # [수정] 가장 안정적인 데이터 소스 심볼로 재배치
-    indices = {
-        '나스닥': 'IXIC', 
-        'S&P500': 'US500', 
-        '필라델피아 반도체': 'SOX'
-    }
-
     try:
-        print(f"--- 미국 증시 분석 시작: {target_date_str} ---")
-        report_data = []
-        summary_text = f"🇺🇸 {target_date_str} 미국 증시 마감\n\n"
+        print(f"--- 미국 주요 종목 분석 시작: {target_date_str} ---")
+        
+        # 1. 나스닥 100 종목 리스트 가져오기
+        # NASDAQ 100은 나스닥의 핵심 우량주 100개를 의미합니다.
+        df_nas100 = fdr.StockListing('NASDAQ')
+        
+        # 시가총액 순으로 상위 100개만 자릅니다 (애플, 마이크로소프트, 엔비디아 등 포함)
+        df_top100 = df_nas100.head(100).copy()
 
-        for name, symbol in indices.items():
-            try:
-                # 야후 파이낸스 에러를 피하기 위해 데이터 로딩 시도
-                df = fdr.DataReader(symbol)
-                
-                # 만약 데이터를 못 가져왔다면 다른 심볼로 재시도
-                if df is None or df.empty:
-                    alt_symbols = {'나스닥': 'NASDAQ', '필라델피아 반도체': 'PHLX Semiconductor'}
-                    if name in alt_symbols:
-                        df = fdr.DataReader(alt_symbols[name])
-                
-                if df is not None and not df.empty:
-                    last = df.iloc[-1]
-                    prev = df.iloc[-2]
-                    
-                    close_val = float(last['Close'])
-                    change_val = close_val - float(prev['Close'])
-                    chg_ratio = (change_val / float(prev['Close'])) * 100
-                    
-                    icon = "📈" if change_val > 0 else "📉"
-                    summary_text += f"{icon} {name}: {chg_ratio:+.2f}%\n"
+        # 2. 한글 매핑 및 정리
+        # 미국 데이터는 컬럼명이 다를 수 있어 유연하게 매핑합니다.
+        h_map = {
+            'Symbol': '티커(코드)', 
+            'Name': '종목명', 
+            'Industry': '산업군',
+            'Price': '현재가($)', 
+            'Changes': '전일대비', 
+            'ChgPct': '등락률(%)'
+        }
+        
+        # 실제 존재하는 컬럼만 선택
+        df_final = df_top100[[c for c in h_map.keys() if c in df_top100.columns]].copy()
+        df_final = df_final.rename(columns=h_map)
 
-                    report_data.append({
-                        '지수명': name,
-                        '현재지수': close_val,
-                        '전일대비': change_val,
-                        '등락률(%)': chg_ratio,
-                        '시가': last['Open'],
-                        '고가': last['High'],
-                        '저가': last['Low']
-                    })
-                else:
-                    print(f"{name} 데이터 수집 실패")
-            except:
-                print(f"{name} 수집 중 오류 발생 - 건너뜀")
-                continue
-
-        if not report_data:
-            print("데이터가 하나도 없습니다.")
-            return
-
-        # 3. 엑셀 파일 생성
-        file_name = f"{target_date_str}_미국증시_리포트.xlsx"
-        df_final = pd.DataFrame(report_data)
-
-        fill_red = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")
-        fill_blue = PatternFill(start_color="0000FF", end_color="0000FF", fill_type="solid")
+        # 3. 엑셀 파일 생성 및 스타일 적용
+        file_name = f"{target_date_str}_나스닥100_리포트.xlsx"
+        
+        fill_red = PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid")  # 상승
+        fill_blue = PatternFill(start_color="0000FF", end_color="0000FF", fill_type="solid") # 하락
         white_font = Font(color="FFFFFF", bold=True)
 
         with pd.ExcelWriter(file_name, engine='openpyxl') as writer:
-            df_final.to_excel(writer, sheet_name='미국지수', index=False)
-            ws = writer.sheets['미국지수']
+            df_final.to_excel(writer, sheet_name='나스닥상위100', index=False)
+            ws = writer.sheets['나스닥상위100']
+            
+            # 등락률(%) 컬럼 위치 찾기 (보통 마지막)
+            ratio_idx = len(df_final.columns)
             
             for row in range(2, ws.max_row + 1):
-                ratio_val = ws.cell(row=row, column=4).value 
-                name_cell = ws.cell(row=row, column=1) 
-                if ratio_val:
-                    if ratio_val > 0:
+                ratio_val = ws.cell(row=row, column=ratio_idx).value
+                name_cell = ws.cell(row=row, column=2) # 종목명 칸 색칠
+                
+                try:
+                    ratio_num = float(ratio_val)
+                    if ratio_num > 0:
                         name_cell.fill = fill_red
                         name_cell.font = white_font
-                    elif ratio_val < 0:
+                    elif ratio_num < 0:
                         name_cell.fill = fill_blue
                         name_cell.font = white_font
-                
-                for col in range(1, 8):
+                except:
+                    pass
+
+                # 정렬 및 서식
+                for col in range(1, len(df_final.columns) + 1):
                     cell = ws.cell(row=row, column=col)
-                    cell.alignment = Alignment(horizontal='center', vertical='center')
+                    cell.alignment = Alignment(horizontal='center')
                     if isinstance(cell.value, (int, float)):
                         cell.number_format = '#,##0.00'
 
-            for i in range(1, 8):
+            # 열 너비 조절
+            for i in range(1, len(df_final.columns) + 1):
                 ws.column_dimensions[chr(64+i)].width = 20
 
         # 4. 텔레그램 전송
         bot = Bot(token=TOKEN)
         async with bot:
-            summary_text += "\n📊 상세 내용은 엑셀 파일을 확인하세요!"
+            msg = f"🇺🇸 {target_date_str} 나스닥 100 주요 종목 리포트\n시가총액 상위 100개 종목의 마감 현황입니다."
             with open(file_name, 'rb') as f:
-                await bot.send_document(chat_id=CHAT_ID, document=f, caption=summary_text)
-        print(f"--- [성공] 전송 완료 ---")
+                await bot.send_document(chat_id=CHAT_ID, document=f, caption=msg)
+        
+        print(f"--- [성공] 미국 종목 리포트 전송 완료 ---")
 
     except Exception as e:
-        print(f"최종 오류: {e}")
+        import traceback
+        print(f"오류 상세:\n{traceback.format_exc()}")
 
 if __name__ == "__main__":
-    asyncio.run(send_us_smart_report())
+    asyncio.run(send_us_major_report())
