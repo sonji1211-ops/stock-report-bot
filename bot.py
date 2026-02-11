@@ -6,21 +6,26 @@ import asyncio
 from telegram import Bot
 from openpyxl.styles import Alignment, PatternFill
 
-# [설정] 직접 입력 모드 (가장 확실함)
+# [설정] 직접 입력 모드
 TOKEN = "8574978661:AAF5SXIgfpJlnAfN5ccSk0tJek_uSlCMBBo"
 CHAT_ID = "8564327930" 
 
 async def send_smart_report():
     # 1. 한국 시간(KST)으로 기준 설정
-    # 깃허브 서버(UTC)보다 9시간 빠른 한국 시간으로 날짜를 잡습니다.
     now = datetime.utcnow() + timedelta(hours=9)
     target_date_str = now.strftime('%Y-%m-%d')
+    day_of_week = now.weekday() # 5: 토요일, 6: 일요일
     
-    # 보고서 타입 (오늘 요일에 따라 자동 결정)
-    report_type = "주간" if now.weekday() == 5 else "일일"
+    # 일요일은 실행하지 않음
+    if day_of_week == 6:
+        print("일요일은 휴무입니다.")
+        return
+
+    # 보고서 타입 결정 (토요일은 주간 리포트)
+    report_type = "주간" if day_of_week == 5 else "일일"
 
     try:
-        print(f"--- 분석 시작: {target_date_str} (한국시간 기준) ---")
+        print(f"--- 분석 시작: {target_date_str} ({report_type} 모드) ---")
         
         # 2. 데이터 수집 (KRX 전체 종목)
         df = fdr.StockListing('KRX')
@@ -28,7 +33,7 @@ async def send_smart_report():
             print("데이터를 가져오는 데 실패했습니다.")
             return
 
-        # 3. 필수 컬럼 정리 및 숫자 변환
+        # 3. 필수 컬럼 정리 및 숫자 변환 (기존 로직)
         cols = df.columns.tolist()
         chg_amt_col = next((c for c in ['Change', 'Changes', 'ChgAmt'] if c in cols), None)
         cap_col = next((c for c in ['Marcap', 'Amount', 'MarketCap'] if c in cols), cols[-1])
@@ -39,7 +44,7 @@ async def send_smart_report():
             if c in df.columns:
                 df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
         
-        # 4. 등락률 계산
+        # 4. 등락률 계산 (기존 로직)
         if chg_amt_col:
             def calculate_ratio(row):
                 prev_close = row['Close'] - row[chg_amt_col]
@@ -50,7 +55,7 @@ async def send_smart_report():
             df['Calculated_Ratio'] = pd.to_numeric(df[ratio_col], errors='coerce').fillna(0)
             if df['Calculated_Ratio'].max() > 100: df['Calculated_Ratio'] /= 100
 
-        # 5. 한글 매핑 및 필터링 (상승/하락 5% 기준)
+        # 5. 한글 매핑 및 필터링 (토요일은 주간 +-5% 기준 자동 적용)
         h_map = {
             'Code': '종목코드', 'Name': '종목명', 'Market': '시장',
             'Open': '시가', 'Close': '종가(현재가)', 
@@ -59,6 +64,8 @@ async def send_smart_report():
 
         def process_data(market, is_up):
             m_df = df[(df['Market'].str.contains(market, na=False)) & (df['Volume'] > 0)].copy()
+            
+            # 상승/하락 필터링 (기존 5% 기준 유지)
             if is_up:
                 res = m_df[m_df['Calculated_Ratio'] >= 5].copy()
             else:
@@ -75,7 +82,7 @@ async def send_smart_report():
             '코스닥_하락': process_data('KOSDAQ', False)
         }
 
-        # 6. 엑셀 파일 생성 및 꾸미기
+        # 6. 엑셀 파일 생성 및 꾸미기 (기존 스타일 유지)
         file_name = f"{target_date_str}_{report_type}_리포트.xlsx"
         
         fill_yellow = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
@@ -105,7 +112,6 @@ async def send_smart_report():
                         cell = ws.cell(row=row, column=col)
                         cell.alignment = Alignment(horizontal='center', vertical='center')
                         
-                        # 천단위 콤마 서식
                         if isinstance(cell.value, (int, float)):
                             header_name = col_list[col-1]
                             if header_name in ['시가', '종가(현재가)', '거래량']:
@@ -119,7 +125,7 @@ async def send_smart_report():
         # 7. 텔레그램 전송
         bot = Bot(token=TOKEN)
         async with bot:
-            msg = (f"📅 {target_date_str} 리포트 배달완료!\n\n"
+            msg = (f"📅 {target_date_str} {report_type} 리포트 배달완료!\n\n"
                    f"📈 상승(5%↑): {len(sheets_data['코스피_상승'])+len(sheets_data['코스닥_상승'])}개\n"
                    f"📉 하락(5%↓): {len(sheets_data['코스피_하락'])+len(sheets_data['코스닥_하락'])}개\n\n"
                    f"💡 엑셀에서 종목명 색깔을 확인하세요!\n"
