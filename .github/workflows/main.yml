@@ -26,10 +26,10 @@ jobs:
 
       - name: 4. 미국 리포트 실행 (오전 7시 타임)
         # 수동 실행하거나, 7시 스케줄일 때만 실행
-        if: github.event_name == 'workflow_dispatch' || github.event.schedule == '0 22 * * *'
+        if: github.event_name == 'workflow_dispatch' || github.event.schedule == '30 22 * * *'
         run: python us_bot.py
 
       - name: 5. 한국 리포트 실행 (오전 8시 30분 타임)
         # 수동 실행하거나, 8시 30분 스케줄일 때만 실행
-        if: github.event_name == 'workflow_dispatch' || github.event.schedule == '30 23 * * *'
+        if: github.event_name == 'workflow_dispatch' || github.event.schedule == '30 22 * * *'
         run: python bot.py
