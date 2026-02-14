@@ -10,7 +10,7 @@ from openpyxl.styles import Alignment, PatternFill, Font
 TOKEN = "8574978661:AAF5SXIgfpJlnAfN5ccSk0tJek_uSlCMBBo"
 CHAT_ID = "8564327930" 
 
-# 나스닥 100 주요 종목 한글 매핑 (생략 없이 유지)
+# 나스닥 100 주요 종목 한글 매핑
 KOR_NAMES = {
     'AAPL': '애플', 'MSFT': '마이크로소프트', 'NVDA': '엔비디아', 'AMZN': '아마존',
     'GOOGL': '알파벳A', 'GOOG': '알파벳C', 'META': '메타', 'TSLA': '테슬라',
@@ -41,53 +41,52 @@ async def send_us_nasdaq100_full_report():
     target_date_str = now.strftime('%Y-%m-%d')
     day_of_week = now.weekday() 
 
-    # 요일별 리포트 성격 (국내장과 동일)
+    # 요일별 리포트 성격 설정
     if day_of_week == 6:
-        report_type = "주간(월~금평균)"
+        report_type = "주간(월-금평균)"
     elif day_of_week == 5:
-        report_type = "일일(금요일)"
+        report_type = "일일(금요일마감)"
     else:
         report_type = "일일"
 
     try:
-        print(f"--- 미국장 {report_type} 분석 시작 ---")
+        print(f"--- 미국 나스닥 100 {report_type} 분석 시작 ---")
         
-        # 1. 나스닥 종목 리스팅 (상위 100개 대상)
         df_nas = fdr.StockListing('NASDAQ')
         top_100_tickers = df_nas.head(100)
         report_list = []
 
-        # 2. 데이터 수집
         for idx, row in top_100_tickers.iterrows():
             ticker = row['Symbol']
             name = KOR_NAMES.get(ticker, row['Name']) 
             
             try:
-                # 최근 7일치 데이터 확보 (주간 평균 및 고가/저가용)
-                df = fdr.DataReader(ticker).tail(7)
-                if len(df) < 2: continue
+                # 데이터 수집
+                df_price = fdr.DataReader(ticker).tail(2)
+                if len(df_price) < 2: continue
                 
-                curr = df.iloc[-1]
-                prev = df.iloc[-2]
-                
-                # 등락률 계산
+                curr = df_price.iloc[-1]
+                prev = df_price.iloc[-2]
                 chg_ratio = ((curr['Close'] - prev['Close']) / prev['Close']) * 100
                 
-                # 리포트 데이터 구성 (고가, 저가 포함)
+                # 소수점 2자리 반올림 최적화
                 report_list.append({
                     '티커': ticker, '종목명': name, 
-                    '시가($)': curr['Open'], '고가($)': curr['High'], 
-                    '저가($)': curr['Low'], '종가($)': curr['Close'], 
-                    '등락률(%)': chg_ratio
+                    '시가($)': round(curr['Open'], 2), 
+                    '고가($)': round(curr['High'], 2), 
+                    '저가($)': round(curr['Low'], 2), 
+                    '종가($)': round(curr['Close'], 2), 
+                    '등락률(%)': round(chg_ratio, 2)
                 })
             except: continue
 
         if not report_list: return
 
+        # 데이터프레임 변환 및 정렬
         df_final = pd.DataFrame(report_list).sort_values(by='등락률(%)', ascending=False)
-        file_name = f"{target_date_str}_{report_type}_나스닥리포트.xlsx"
+        file_name = f"{target_date_str}_{report_type}_미국리포트.xlsx"
 
-        # 3. 엑셀 생성 및 색상 적용 (지수님 요청 4단계 기준)
+        # 스타일 설정
         fill_red = PatternFill(start_color="FF0000", fill_type="solid")
         fill_orange = PatternFill(start_color="FFCC00", fill_type="solid")
         fill_yellow = PatternFill(start_color="FFFF00", fill_type="solid")
@@ -98,11 +97,12 @@ async def send_us_nasdaq100_full_report():
             ws = writer.sheets['NASDAQ100']
             
             for row in range(2, ws.max_row + 1):
-                # 등락률(%)은 7번째 열
-                val = abs(float(ws.cell(row=row, column=7).value or 0))
+                # 등락률(%) 열 (7번째)
+                ratio_cell = ws.cell(row=row, column=7)
+                val = abs(float(ratio_cell.value or 0))
                 name_cell = ws.cell(row=row, column=2)
 
-                # 색상 기준 적용
+                # 색상 기준 (지수님 요청 4단계)
                 if val >= 25: 
                     name_cell.fill, name_cell.font = fill_red, font_white
                 elif val >= 20: 
@@ -110,17 +110,20 @@ async def send_us_nasdaq100_full_report():
                 elif val >= 10: 
                     name_cell.fill = fill_yellow
                 
-                # 가운데 정렬 및 포맷
+                # 정렬 및 표시 형식
                 for col in range(1, 8):
-                    ws.cell(row=row, column=col).alignment = Alignment(horizontal='center')
+                    cell = ws.cell(row=row, column=col)
+                    cell.alignment = Alignment(horizontal='center')
+                    # 숫자는 엑셀에서도 소수점 2자리로 보이게 고정
+                    if col >= 3:
+                        cell.number_format = '0.00'
             
-            ws.column_dimensions['B'].width = 25 # 종목명 칸 넓게
+            ws.column_dimensions['B'].width = 28 
 
-        # 4. 텔레그램 전송
         bot = Bot(token=TOKEN)
         async with bot:
             cap = f"🇺🇸 {target_date_str} 나스닥100 {report_type} 리포트"
-            msg = f"{cap}\n\n💡 색상 기준:\n⚪ 5%↑ | 🟡 10%↑ | 🟠 20%↑ | 🔴 25%↑"
+            msg = f"{cap}\n\n✅ 소수점 2자리 최적화 완료\n⚪ 5%↑ | 🟡 10%↑ | 🟠 20%↑ | 🔴 25%↑"
             with open(file_name, 'rb') as f:
                 await bot.send_document(chat_id=CHAT_ID, document=f, caption=msg)
 
