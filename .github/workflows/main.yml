@@ -2,10 +2,8 @@ name: Stock Report Bot
 
 on:
   schedule:
-    # 한국 시간(KST) 매일 아침 07:30 자동 실행
-    # (UTC 기준 전날 22:30)
-    - cron: '30 22 * * *'
-  workflow_dispatch: # 필요할 때 수동으로 실행 가능한 버튼
+    - cron: '30 22 * * *' # 한국 시간 아침 7:30
+  workflow_dispatch:
 
 jobs:
   build:
@@ -22,7 +20,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pandas FinanceDataReader openpyxl python-telegram-bot
+          pip install --upgrade pip
+          pip install pandas==2.0.3 finance-datareader openpyxl python-telegram-bot
 
       - name: Run Korean Stock Bot
         run: python bot.py
