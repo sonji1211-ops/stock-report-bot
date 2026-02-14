@@ -21,7 +21,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install pandas==2.0.3 finance-datareader openpyxl python-telegram-bot
+          pip install "numpy<2.0.0" pandas==2.0.3 finance-datareader openpyxl python-telegram-bot
 
       - name: Run Korean Stock Bot
         run: python bot.py
