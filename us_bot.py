@@ -46,29 +46,41 @@ async def send_us_report():
         df_base = fdr.StockListing('NASDAQ')
         if df_base is None or df_base.empty: return
 
-        # 수치형 변환 (오류 방지)
-        df_base['Close'] = pd.to_numeric(df_base['Close'], errors='coerce').fillna(0)
+        # [핵심] 컬럼명 유연하게 찾기 로직
+        # 가격 컬럼 찾기
+        price_col = next((c for c in ['Close', 'Price', 'Last'] if c in df_base.columns), None)
+        # 등락률 컬럼 찾기
+        ratio_col = next((c for c in ['ChgPct', 'ChangesRatio', 'PctChg'] if c in df_base.columns), None)
+        # 티커 컬럼 찾기
+        symbol_col = next((c for c in ['Symbol', 'Ticker'] if c in df_base.columns), 'Symbol')
+
+        if not price_col:
+            print(f"현재 사용 가능한 컬럼: {df_base.columns.tolist()}")
+            raise ValueError("가격(Close/Price) 컬럼을 찾을 수 없습니다.")
+
+        # 수치형 변환 및 Ratio 확보
+        df_base['Price_Final'] = pd.to_numeric(df_base[price_col], errors='coerce').fillna(0)
         
-        # 등락률 계산 (ChgPct가 있으면 사용, 없으면 직접 계산)
-        if 'ChgPct' in df_base.columns:
-            df_base['Ratio'] = pd.to_numeric(df_base['ChgPct'], errors='coerce').fillna(0) * 100
+        if ratio_col:
+            # ChgPct가 소수점 형태(0.05)인지 백분율 형태(5.0)인지 체크하여 100을 곱함
+            df_base['Ratio'] = pd.to_numeric(df_base[ratio_col], errors='coerce').fillna(0)
+            if df_base['Ratio'].abs().max() < 1: # 최대값이 1보다 작으면 소수점 형태로 판단
+                df_base['Ratio'] = df_base['Ratio'] * 100
         else:
-            # 직접 계산 시 'Close'와 'Changes' 컬럼 활용
-            df_base['Changes'] = pd.to_numeric(df_base.get('Changes', 0), errors='coerce').fillna(0)
-            df_base['Ratio'] = (df_base['Changes'] / (df_base['Close'] - df_base['Changes']) * 100).fillna(0)
+            df_base['Ratio'] = 0
 
         # 한글 이름 적용
-        df_base['Name'] = df_base.apply(lambda x: KR_NAMES.get(x['Symbol'], x['Name']), axis=1)
+        df_base['Name_KR'] = df_base.apply(lambda x: KR_NAMES.get(x[symbol_col], x['Name']), axis=1)
 
-        # 컬럼 순서 설정 (티커, 종목명, 종가, 등락률, 산업군)
-        df_final = df_base[['Symbol', 'Name', 'Close', 'Ratio', 'Industry']].copy()
+        # 컬럼 추출 (티커, 종목명, 종가, 등락률, 산업군)
+        df_final = df_base[[symbol_col, 'Name_KR', 'Price_Final', 'Ratio', 'Industry']].copy()
         
         up_df = df_final[df_final['Ratio'] >= 5].sort_values('Ratio', ascending=False)
         down_df = df_final[df_final['Ratio'] <= -5].sort_values('Ratio', ascending=True)
 
         # 엑셀 파일 생성
         file_name = f"{now.strftime('%m%d')}_나스닥_리포트.xlsx"
-        h_map = {'Symbol':'티커', 'Name':'종목명', 'Close':'종가', 'Ratio':'등락률(%)', 'Industry':'산업'}
+        h_map = {symbol_col:'티커', 'Name_KR':'종목명', 'Price_Final':'종가', 'Ratio':'등락률(%)', 'Industry':'산업'}
 
         with pd.ExcelWriter(file_name, engine='openpyxl') as writer:
             for s_name, data in [('나스닥_상승', up_df), ('나스닥_하락', down_df)]:
@@ -76,14 +88,13 @@ async def send_us_report():
                 ws = writer.sheets[s_name]
                 
                 for row in range(2, ws.max_row + 1):
-                    ratio_val = abs(float(ws.cell(row, 4).value or 0)) # 등락률 컬럼(D열)
+                    ratio_val = abs(float(ws.cell(row, 4).value or 0)) # 등락률(D열)
                     name_cell = ws.cell(row, 2) # 종목명(B열)
                     
-                    # 색상 강조
                     if ratio_val >= 20: name_cell.fill = PatternFill("solid", fgColor="FFCC00")
                     elif ratio_val >= 10: name_cell.fill = PatternFill("solid", fgColor="FFFF00")
                     
-                    # 가독성: 종가 천 단위 콤마(C열), 등락률 소수점(D열)
+                    # 가독성: 종가(C열) 콤마, 등락률(D열) 소수점
                     ws.cell(row, 3).number_format = '#,##0.00'
                     ws.cell(row, 4).number_format = '0.00'
                     
@@ -95,7 +106,7 @@ async def send_us_report():
             msg = (f"🇺🇸 {target_date_str} 나스닥 리포트 배달완료!\n\n"
                    f"📈 상승(5%↑): {len(up_df)}개\n"
                    f"📉 하락(5%↓): {len(down_df)}개\n\n"
-                   f"💡 주요 100개 종목 한글화 & 가독성 강화 적용")
+                   f"💡 컬럼 자동 탐색 및 가독성 최적화 적용")
             with open(file_name, 'rb') as f:
                 await bot.send_document(CHAT_ID, f, caption=msg)
         print(f"--- {file_name} 전송 완료 ---")
