@@ -18,7 +18,9 @@ async def send_smart_report():
     try:
         # 1. 전 종목 기본 데이터 확보
         df_base = fdr.StockListing('KRX')
-        if df_base is None or df_base.empty: return
+        if df_base is None or df_base.empty:
+            print("데이터를 불러오지 못했습니다.")
+            return
 
         # 2. 요일별 모드 설정
         if day_of_week == 6: # [일요일] 시총 상위 500개 주간 정밀 분석
@@ -42,12 +44,11 @@ async def send_smart_report():
                     }
                 except: return None
 
-            # --- 지수님이 말씀하신 병렬 처리 핵심 로직 (일요일 전용) ---
-            print("--- 일요일 주간 데이터 병렬 분석 중... ---")
+            # --- 병렬 처리 핵심 (일요일 전용) ---
+            print(f"--- {report_type} 병렬 데이터 수집 시작 ---")
             tasks = [fetch_weekly(row) for _, row in df_target.iterrows()]
             results = await asyncio.gather(*tasks)
             df_final = pd.DataFrame([r for r in results if r is not None])
-            # ------------------------------------------------------
             
             target_date_str = f"{start_d}~{end_d}"
             analysis_info = "시가총액 상위 500"
@@ -57,13 +58,21 @@ async def send_smart_report():
             if day_of_week == 5: report_type = "일일(금요일마감)"
             target_date_str = now.strftime('%Y-%m-%d')
             
-            # 일일 보고는 이미 df_base에 데이터가 다 있어서 병렬 처리가 필요 없이 바로 변환 (초고속)
-            ratio_col = next((c for c in ['ChgPct', 'ChangesRatio', 'FlucRate'] if c in df_base.columns), 'ChangesRatio')
-            df_base['Ratio'] = pd.to_numeric(df_base[ratio_col], errors='coerce').fillna(0)
+            # [오류 해결 포인트] 컬럼명 유연하게 찾기 (ChangesRatio 오류 방지)
+            ratio_col = next((c for c in ['ChgPct', 'ChangesRatio', 'FlucRate'] if c in df_base.columns), None)
+            
+            if ratio_col:
+                df_base['Ratio'] = pd.to_numeric(df_base[ratio_col], errors='coerce').fillna(0)
+            else:
+                # 컬럼명이 모두 없을 경우 직접 계산 (종가와 전일대비 사용)
+                df_base['Ratio'] = ((df_base['Changes'] / (df_base['Close'] - df_base['Changes'])) * 100).fillna(0)
+            
             df_final = df_base[['Code', 'Name', 'Market', 'Open', 'High', 'Low', 'Close', 'Ratio', 'Volume']].copy()
             analysis_info = "전 종목 전수조사"
 
-        if df_final is None or df_final.empty: return
+        if df_final is None or df_final.empty:
+            print("최종 데이터프레임이 비어 있습니다.")
+            return
 
         # 3. 분류 로직 (상승/하락 5% 기준)
         h_map = {'Code':'종목코드', 'Name':'종목명', 'Market':'시장', 'Open':'시가', 'High':'고가', 'Low':'저가', 'Close':'종가', 'Ratio':'등락률(%)', 'Volume':'거래량'}
@@ -102,10 +111,13 @@ async def send_smart_report():
                    f"📈 상승(5%↑): {len(sheets_data['코스피_상승'])+len(sheets_data['코스닥_상승'])}개\n"
                    f"📉 하락(5%↓): {len(sheets_data['코스피_하락'])+len(sheets_data['코스닥_하락'])}개\n\n"
                    f"💡 🟡10%↑, 🟠20%↑, 🔴28%↑")
+            
             with open(file_name, 'rb') as f:
                 await bot.send_document(CHAT_ID, f, caption=msg)
+        print(f"--- {file_name} 전송 완료 ---")
 
-    except Exception as e: print(f"오류 발생: {e}")
+    except Exception as e:
+        print(f"오류 발생: {e}")
 
 if __name__ == "__main__":
     asyncio.run(send_smart_report())
