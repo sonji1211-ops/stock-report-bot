@@ -10,7 +10,7 @@ from openpyxl.styles import Alignment, PatternFill, Font
 TOKEN = "8574978661:AAF5SXIgfpJlnAfN5ccSk0tJek_uSlCMBBo"
 CHAT_ID = "8564327930"
 
-# [주요 종목 한글 매핑]
+# [주요 종목 한글 매핑] 지수님이 주신 리스트 (누락 없이 유지)
 KR_NAMES = {
     'AAPL': '애플', 'MSFT': '마이크로소프트', 'NVDA': '엔비디아', 'AMZN': '아마존',
     'GOOGL': '알파벳A', 'GOOG': '알파벳C', 'META': '메타', 'TSLA': '테슬라',
@@ -36,83 +36,74 @@ KR_NAMES = {
     'WBD': '워너 브라더스', 'AZN': '아스트라제네카', 'SGEN': '시애틀 제네틱스'
 }
 
+async def fetch_us_stock(row, start_d, end_d):
+    """수집 단계에서 즉시 한글화 적용"""
+    try:
+        h = fdr.DataReader(row['Symbol'], start_d, end_d)
+        if len(h) < 2: return None
+        
+        last_close = h.iloc[-1]['Close']
+        prev_close = h.iloc[-2]['Close']
+        ratio = round(((last_close - prev_close) / prev_close) * 100, 2)
+        
+        # [한글화 포인트] KR_NAMES에서 찾고 없으면 원래 영어 이름 유지
+        korean_name = KR_NAMES.get(row['Symbol'], row['Name'])
+        
+        return {
+            '티커': row['Symbol'],
+            '종목명': korean_name,
+            '종가': last_close,
+            '등락률(%)': ratio,
+            '산업': row.get('Industry', '-')
+        }
+    except:
+        return None
+
 async def send_us_report():
     bot = Bot(token=TOKEN)
     now = datetime.utcnow() + timedelta(hours=9)
-    target_date_str = (now - timedelta(days=1)).strftime('%Y-%m-%d')
+    end_d = now.strftime('%Y-%m-%d')
+    start_d = (now - timedelta(days=5)).strftime('%Y-%m-%d')
 
     try:
-        print("--- 나스닥 데이터 수집 중 ---")
         df_base = fdr.StockListing('NASDAQ')
         if df_base is None or df_base.empty: return
 
-        # [핵심] 컬럼명 유연하게 찾기 로직
-        # 가격 컬럼 찾기
-        price_col = next((c for c in ['Close', 'Price', 'Last'] if c in df_base.columns), None)
-        # 등락률 컬럼 찾기
-        ratio_col = next((c for c in ['ChgPct', 'ChangesRatio', 'PctChg'] if c in df_base.columns), None)
-        # 티커 컬럼 찾기
-        symbol_col = next((c for c in ['Symbol', 'Ticker'] if c in df_base.columns), 'Symbol')
-
-        if not price_col:
-            print(f"현재 사용 가능한 컬럼: {df_base.columns.tolist()}")
-            raise ValueError("가격(Close/Price) 컬럼을 찾을 수 없습니다.")
-
-        # 수치형 변환 및 Ratio 확보
-        df_base['Price_Final'] = pd.to_numeric(df_base[price_col], errors='coerce').fillna(0)
+        # 상위 800개 병렬 수집
+        df_target = df_base.head(800) 
+        tasks = [fetch_us_stock(row, start_d, end_d) for _, row in df_target.iterrows()]
+        results = await asyncio.gather(*tasks)
         
-        if ratio_col:
-            # ChgPct가 소수점 형태(0.05)인지 백분율 형태(5.0)인지 체크하여 100을 곱함
-            df_base['Ratio'] = pd.to_numeric(df_base[ratio_col], errors='coerce').fillna(0)
-            if df_base['Ratio'].abs().max() < 1: # 최대값이 1보다 작으면 소수점 형태로 판단
-                df_base['Ratio'] = df_base['Ratio'] * 100
-        else:
-            df_base['Ratio'] = 0
-
-        # 한글 이름 적용
-        df_base['Name_KR'] = df_base.apply(lambda x: KR_NAMES.get(x[symbol_col], x['Name']), axis=1)
-
-        # 컬럼 추출 (티커, 종목명, 종가, 등락률, 산업군)
-        df_final = df_base[[symbol_col, 'Name_KR', 'Price_Final', 'Ratio', 'Industry']].copy()
+        df_final = pd.DataFrame([r for r in results if r is not None])
         
-        up_df = df_final[df_final['Ratio'] >= 5].sort_values('Ratio', ascending=False)
-        down_df = df_final[df_final['Ratio'] <= -5].sort_values('Ratio', ascending=True)
+        # 상/하락 필터링 및 엑셀 생성 로직 (생략 없이 유지)
+        up_df = df_final[df_final['등락률(%)'] >= 5].sort_values('등락률(%)', ascending=False)
+        down_df = df_final[df_final['등락률(%)'] <= -5].sort_values('등락률(%)', ascending=True)
 
-        # 엑셀 파일 생성
         file_name = f"{now.strftime('%m%d')}_나스닥_리포트.xlsx"
-        h_map = {symbol_col:'티커', 'Name_KR':'종목명', 'Price_Final':'종가', 'Ratio':'등락률(%)', 'Industry':'산업'}
-
         with pd.ExcelWriter(file_name, engine='openpyxl') as writer:
             for s_name, data in [('나스닥_상승', up_df), ('나스닥_하락', down_df)]:
-                data.rename(columns=h_map).to_excel(writer, sheet_name=s_name, index=False)
+                data.to_excel(writer, sheet_name=s_name, index=False)
                 ws = writer.sheets[s_name]
-                
                 for row in range(2, ws.max_row + 1):
-                    ratio_val = abs(float(ws.cell(row, 4).value or 0)) # 등락률(D열)
-                    name_cell = ws.cell(row, 2) # 종목명(B열)
-                    
+                    # 가독성 및 스타일 (누락 방지)
+                    ratio_val = abs(float(ws.cell(row, 4).value or 0))
+                    name_cell = ws.cell(row, 2)
                     if ratio_val >= 20: name_cell.fill = PatternFill("solid", fgColor="FFCC00")
                     elif ratio_val >= 10: name_cell.fill = PatternFill("solid", fgColor="FFFF00")
-                    
-                    # 가독성: 종가(C열) 콤마, 등락률(D열) 소수점
                     ws.cell(row, 3).number_format = '#,##0.00'
                     ws.cell(row, 4).number_format = '0.00'
-                    
-                    for c in range(1, 6):
-                        ws.cell(row, c).alignment = Alignment(horizontal='center')
+                    for c in range(1, 6): ws.cell(row, c).alignment = Alignment(horizontal='center')
                 for i in range(1, 6): ws.column_dimensions[chr(64+i)].width = 20
 
         async with bot:
-            msg = (f"🇺🇸 {target_date_str} 나스닥 리포트 배달완료!\n\n"
+            msg = (f"🇺🇸 {end_d} 나스닥 리포트 배달완료!\n\n"
                    f"📈 상승(5%↑): {len(up_df)}개\n"
                    f"📉 하락(5%↓): {len(down_df)}개\n\n"
-                   f"💡 컬럼 자동 탐색 및 가독성 최적화 적용")
-            with open(file_name, 'rb') as f:
-                await bot.send_document(CHAT_ID, f, caption=msg)
-        print(f"--- {file_name} 전송 완료 ---")
+                   f"💡 주요 종목 한글화 적용 완료")
+            await bot.send_document(CHAT_ID, open(file_name, 'rb'), caption=msg)
 
-    except Exception as e:
-        print(f"미국장 오류: {e}")
+    except Exception as e: print(f"오류: {e}")
 
 if __name__ == "__main__":
     asyncio.run(send_us_report())
