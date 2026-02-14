@@ -4,13 +4,13 @@ import pandas as pd
 from datetime import datetime, timedelta
 import asyncio
 from telegram import Bot
-from openpyxl.styles import Alignment, Font
+from openpyxl.styles import Alignment, PatternFill, Font
 
 # [설정] 텔레그램 정보
 TOKEN = "8574978661:AAF5SXIgfpJlnAfN5ccSk0tJek_uSlCMBBo"
 CHAT_ID = "8564327930" 
 
-# 나스닥 100 주요 종목 전체 한글 매핑 (100개 근접)
+# 나스닥 100 주요 종목 한글 매핑 (생략 없이 유지)
 KOR_NAMES = {
     'AAPL': '애플', 'MSFT': '마이크로소프트', 'NVDA': '엔비디아', 'AMZN': '아마존',
     'GOOGL': '알파벳A', 'GOOG': '알파벳C', 'META': '메타', 'TSLA': '테슬라',
@@ -41,88 +41,88 @@ async def send_us_nasdaq100_full_report():
     target_date_str = now.strftime('%Y-%m-%d')
     day_of_week = now.weekday() 
 
-    is_saturday = (day_of_week == 5)
+    # 요일별 리포트 성격 (국내장과 동일)
+    if day_of_week == 6:
+        report_type = "주간(월~금평균)"
+    elif day_of_week == 5:
+        report_type = "일일(금요일)"
+    else:
+        report_type = "일일"
 
     try:
-        print(f"--- 나스닥 100 한글 풀 리포트 시작 (토요일 필터링: {is_saturday}) ---")
+        print(f"--- 미국장 {report_type} 분석 시작 ---")
         
-        # 1. 나스닥 종목 리스팅
+        # 1. 나스닥 종목 리스팅 (상위 100개 대상)
         df_nas = fdr.StockListing('NASDAQ')
         top_100_tickers = df_nas.head(100)
-
         report_list = []
 
-        # 2. 각 종목별 데이터 수집
+        # 2. 데이터 수집
         for idx, row in top_100_tickers.iterrows():
             ticker = row['Symbol']
-            # 매핑 사전에 있으면 한글, 없으면 원문 사용
             name = KOR_NAMES.get(ticker, row['Name']) 
             
             try:
-                # 데이터 기간 확보
+                # 최근 7일치 데이터 확보 (주간 평균 및 고가/저가용)
                 df = fdr.DataReader(ticker).tail(7)
                 if len(df) < 2: continue
                 
-                if is_saturday:
-                    # 주간 누적 (월~금)
-                    weekly_open = df.iloc[0]['Open']
-                    weekly_close = df.iloc[-1]['Close']
-                    chg_ratio = ((weekly_close - weekly_open) / weekly_open) * 100
-                    
-                    if abs(chg_ratio) >= 5:
-                        report_list.append({
-                            '티커': ticker, '종목명': name, '주초시작가($)': weekly_open,
-                            '주말마감가($)': weekly_close, '주간등락률(%)': chg_ratio
-                        })
-                else:
-                    # 일일 변동
-                    prev_close = df.iloc[-2]['Close']
-                    curr_close = df.iloc[-1]['Close']
-                    curr_open = df.iloc[-1]['Open']
-                    chg_ratio = ((curr_close - prev_close) / prev_close) * 100
-                    
-                    report_list.append({
-                        '티커': ticker, '종목명': name, '시작가($)': curr_open,
-                        '마감가($)': curr_close, '등락률(%)': chg_ratio
-                    })
-            except:
-                continue
+                curr = df.iloc[-1]
+                prev = df.iloc[-2]
+                
+                # 등락률 계산
+                chg_ratio = ((curr['Close'] - prev['Close']) / prev['Close']) * 100
+                
+                # 리포트 데이터 구성 (고가, 저가 포함)
+                report_list.append({
+                    '티커': ticker, '종목명': name, 
+                    '시가($)': curr['Open'], '고가($)': curr['High'], 
+                    '저가($)': curr['Low'], '종가($)': curr['Close'], 
+                    '등락률(%)': chg_ratio
+                })
+            except: continue
 
-        if not report_list:
-            if is_saturday:
-                bot = Bot(token=TOKEN)
-                async with bot:
-                    await bot.send_message(chat_id=CHAT_ID, text=f"🇺🇸 {target_date_str}\n이번 주 5% 이상 변동 종목 없음")
-                return
-            else: return
+        if not report_list: return
 
-        # 3. 엑셀 제작 및 전송
-        df_final = pd.DataFrame(report_list)
-        file_name = f"{target_date_str}_나스닥100_최종리포트.xlsx"
-        font_red = Font(color="FF0000", bold=True)
-        font_blue = Font(color="0000FF", bold=True)
+        df_final = pd.DataFrame(report_list).sort_values(by='등락률(%)', ascending=False)
+        file_name = f"{target_date_str}_{report_type}_나스닥리포트.xlsx"
+
+        # 3. 엑셀 생성 및 색상 적용 (지수님 요청 4단계 기준)
+        fill_red = PatternFill(start_color="FF0000", fill_type="solid")
+        fill_orange = PatternFill(start_color="FFCC00", fill_type="solid")
+        fill_yellow = PatternFill(start_color="FFFF00", fill_type="solid")
+        font_white = Font(color="FFFFFF", bold=True)
 
         with pd.ExcelWriter(file_name, engine='openpyxl') as writer:
             df_final.to_excel(writer, sheet_name='NASDAQ100', index=False)
             ws = writer.sheets['NASDAQ100']
+            
             for row in range(2, ws.max_row + 1):
-                ratio_val = ws.cell(row=row, column=5).value
-                if ratio_val and ratio_val > 0:
-                    ws.cell(row=row, column=2).font = font_red
-                    ws.cell(row=row, column=5).font = font_red
-                elif ratio_val and ratio_val < 0:
-                    ws.cell(row=row, column=2).font = font_blue
-                    ws.cell(row=row, column=5).font = font_blue
-                for col in range(1, 6):
-                    ws.cell(row=row, column=col).alignment = Alignment(horizontal='center')
-            ws.column_dimensions['B'].width = 28
+                # 등락률(%)은 7번째 열
+                val = abs(float(ws.cell(row=row, column=7).value or 0))
+                name_cell = ws.cell(row=row, column=2)
 
+                # 색상 기준 적용
+                if val >= 25: 
+                    name_cell.fill, name_cell.font = fill_red, font_white
+                elif val >= 20: 
+                    name_cell.fill = fill_orange
+                elif val >= 10: 
+                    name_cell.fill = fill_yellow
+                
+                # 가운데 정렬 및 포맷
+                for col in range(1, 8):
+                    ws.cell(row=row, column=col).alignment = Alignment(horizontal='center')
+            
+            ws.column_dimensions['B'].width = 25 # 종목명 칸 넓게
+
+        # 4. 텔레그램 전송
         bot = Bot(token=TOKEN)
         async with bot:
-            cap = f"🇺🇸 {target_date_str} 나스닥 100 마감 리포트"
-            if is_saturday: cap = f"📊 {target_date_str} 주간 누적(±5%) 리포트"
+            cap = f"🇺🇸 {target_date_str} 나스닥100 {report_type} 리포트"
+            msg = f"{cap}\n\n💡 색상 기준:\n⚪ 5%↑ | 🟡 10%↑ | 🟠 20%↑ | 🔴 25%↑"
             with open(file_name, 'rb') as f:
-                await bot.send_document(chat_id=CHAT_ID, document=f, caption=cap)
+                await bot.send_document(chat_id=CHAT_ID, document=f, caption=msg)
 
     except Exception as e:
         print(f"오류: {e}")
