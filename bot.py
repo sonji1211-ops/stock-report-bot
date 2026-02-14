@@ -18,16 +18,13 @@ async def send_smart_report():
     try:
         # 1. 전 종목 기본 데이터 확보
         df_base = fdr.StockListing('KRX')
-        if df_base is None or df_base.empty:
-            print("데이터를 불러오지 못했습니다.")
-            return
+        if df_base is None or df_base.empty: return
 
         # 2. 요일별 모드 설정
         if day_of_week == 6: # [일요일] 주간 정밀 분석
             report_type = "주간평균"
             end_d = (now - timedelta(days=2)).strftime('%Y-%m-%d')
             start_d = (now - timedelta(days=6)).strftime('%Y-%m-%d')
-            
             df_target = df_base.sort_values(by='Marcap', ascending=False).head(500).copy()
             
             async def fetch_weekly(row):
@@ -35,15 +32,14 @@ async def send_smart_report():
                     h = fdr.DataReader(row['Code'], start_d, end_d)
                     if len(h) < 2: return None
                     h['rt'] = h['Close'].pct_change() * 100
-                    avg_ratio = round(h['rt'].mean(), 2)
                     return {
-                        'Code': row['Code'], 'Name': row['Name'], 'Market': row['Market'],
-                        'Open': h.iloc[-1]['Open'], 'High': h['High'].max(), 'Low': h['Low'].min(),
-                        'Close': h.iloc[-1]['Close'], 'Ratio': avg_ratio, 'Volume': h.iloc[-1]['Volume']
+                        'Code': row['Code'], 'Name': row['Name'], 
+                        'Open': h.iloc[-1]['Open'], 'Close': h.iloc[-1]['Close'],
+                        'Low': h['Low'].min(), 'High': h['High'].max(), 
+                        'Ratio': round(h['rt'].mean(), 2), 'Volume': h.iloc[-1]['Volume']
                     }
                 except: return None
 
-            print(f"--- {report_type} 병렬 데이터 수집 시작 ---")
             tasks = [fetch_weekly(row) for _, row in df_target.iterrows()]
             results = await asyncio.gather(*tasks)
             df_final = pd.DataFrame([r for r in results if r is not None])
@@ -55,39 +51,39 @@ async def send_smart_report():
             if day_of_week == 5: report_type = "일일(금요일마감)"
             target_date_str = now.strftime('%Y-%m-%d')
             
-            # [오류 해결 포인트 1] 모든 수치 데이터를 강제로 숫자(numeric)로 변환
-            # errors='coerce'를 쓰면 숫자가 아닌 값은 NaN이 되고, fillna(0)으로 0처리 됩니다.
+            # 수치 형변환
             df_base['Close'] = pd.to_numeric(df_base['Close'], errors='coerce').fillna(0)
             df_base['Changes'] = pd.to_numeric(df_base['Changes'], errors='coerce').fillna(0)
+            df_base['Volume'] = pd.to_numeric(df_base['Volume'], errors='coerce').fillna(0)
             
-            # [오류 해결 포인트 2] 등락률 컬럼 유연하게 찾기
             ratio_col = next((c for c in ['ChgPct', 'ChangesRatio', 'FlucRate'] if c in df_base.columns), None)
-            
             if ratio_col:
                 df_base['Ratio'] = pd.to_numeric(df_base[ratio_col], errors='coerce').fillna(0)
             else:
-                # 직접 계산: (전일비 / 전일종가) * 100
-                # 전일종가 = 현재가 - 전일비
                 df_base['Ratio'] = (df_base['Changes'] / (df_base['Close'] - df_base['Changes']) * 100).fillna(0)
             
-            df_final = df_base[['Code', 'Name', 'Market', 'Open', 'High', 'Low', 'Close', 'Ratio', 'Volume']].copy()
+            # 요청 순서: 종목코드, 종목명, 시가, 종가, 저가, 고가, 등락률, 거래량
+            df_final = df_base[['Code', 'Name', 'Open', 'Close', 'Low', 'High', 'Ratio', 'Volume']].copy()
             analysis_info = "전 종목 전수조사"
 
         if df_final is None or df_final.empty: return
 
         # 3. 분류 로직
-        h_map = {'Code':'종목코드', 'Name':'종목명', 'Market':'시장', 'Open':'시가', 'High':'고가', 'Low':'저가', 'Close':'종가', 'Ratio':'등락률(%)', 'Volume':'거래량'}
-        def get_sub(market, is_up):
-            m_df = df_final[df_final['Market'].str.contains(market, na=False)].copy()
-            # Ratio 수치화 재확인 (문자열 방지)
-            m_df['Ratio'] = pd.to_numeric(m_df['Ratio'], errors='coerce').fillna(0)
-            cond = (m_df['Ratio'] >= 5) if is_up else (m_df['Ratio'] <= -5)
-            return m_df[cond].sort_values('Ratio', ascending=not is_up).rename(columns=h_map)
+        h_map = {'Code':'종목코드', 'Name':'종목명', 'Open':'시가', 'Close':'종가', 'Low':'저가', 'High':'고가', 'Ratio':'등락률(%)', 'Volume':'거래량'}
+        
+        def get_sub_market(market, is_up):
+            temp_df = df_base[df_base['Market'].str.contains(market, na=False)].copy()
+            temp_df['Ratio'] = df_final['Ratio'] 
+            res = temp_df[['Code', 'Name', 'Open', 'Close', 'Low', 'High', 'Ratio', 'Volume']].copy()
+            cond = (res['Ratio'] >= 5) if is_up else (res['Ratio'] <= -5)
+            return res[cond].sort_values('Ratio', ascending=not is_up).rename(columns=h_map)
 
-        sheets_data = {'코스피_상승': get_sub('KOSPI', True), '코스닥_상승': get_sub('KOSDAQ', True),
-                       '코스피_하락': get_sub('KOSPI', False), '코스닥_하락': get_sub('KOSDAQ', False)}
+        sheets_data = {
+            '코스피_상승': get_sub_market('KOSPI', True), '코스닥_상승': get_sub_market('KOSDAQ', True),
+            '코스피_하락': get_sub_market('KOSPI', False), '코스닥_하락': get_sub_market('KOSDAQ', False)
+        }
 
-        # 4. 엑셀 생성 (스타일 유지)
+        # 4. 엑셀 생성 및 숫자 포맷팅(콤마)
         file_name = f"{now.strftime('%m%d')}_{report_type}.xlsx"
         fill_red, fill_orange, fill_yellow = PatternFill("solid", fgColor="FF0000"), PatternFill("solid", fgColor="FFCC00"), PatternFill("solid", fgColor="FFFF00")
         font_white = Font(color="FFFFFF", bold=True)
@@ -97,29 +93,37 @@ async def send_smart_report():
                 data.to_excel(writer, sheet_name=s_name, index=False)
                 ws = writer.sheets[s_name]
                 for row in range(2, ws.max_row + 1):
-                    val = abs(float(ws.cell(row, 8).value or 0))
+                    # 등락률 강조 (G열 = 7번째)
+                    ratio_val = abs(float(ws.cell(row, 7).value or 0))
                     name_cell = ws.cell(row, 2)
-                    if val >= 28: name_cell.fill, name_cell.font = fill_red, font_white
-                    elif val >= 20: name_cell.fill = fill_orange
-                    elif val >= 10: name_cell.fill = fill_yellow
-                    for c in range(1, 10):
+                    if ratio_val >= 28: name_cell.fill, name_cell.font = fill_red, font_white
+                    elif ratio_val >= 20: name_cell.fill = fill_orange
+                    elif ratio_val >= 10: name_cell.fill = fill_yellow
+                    
+                    # 숫자 포맷팅 (콤마)
+                    # 시가(C), 종가(D), 저가(E), 고가(F), 거래량(H) 전체 적용
+                    for col_idx in [3, 4, 5, 6, 8]:
+                        ws.cell(row, col_idx).number_format = '#,##0'
+                    
+                    # 등락률(G)은 소수점 2자리
+                    ws.cell(row, 7).number_format = '0.00'
+                    
+                    for c in range(1, 9):
                         ws.cell(row, c).alignment = Alignment(horizontal='center')
-                        if c == 8: ws.cell(row, c).number_format = '0.00'
-                for i in range(1, 10): ws.column_dimensions[chr(64+i)].width = 15
+                
+                for i in range(1, 9): 
+                    ws.column_dimensions[chr(64+i)].width = 15
 
-        # 5. 발송
+        # 5. 전송
         async with bot:
             msg = (f"📅 {target_date_str} {report_type} 리포트 배달완료!\n\n"
                    f"📊 분석기준: {analysis_info}\n"
                    f"📈 상승(5%↑): {len(sheets_data['코스피_상승'])+len(sheets_data['코스닥_상승'])}개\n"
                    f"📉 하락(5%↓): {len(sheets_data['코스피_하락'])+len(sheets_data['코스닥_하락'])}개\n\n"
                    f"💡 🟡10%↑, 🟠20%↑, 🔴28%↑")
-            with open(file_name, 'rb') as f:
-                await bot.send_document(CHAT_ID, f, caption=msg)
-        print(f"--- {file_name} 전송 성공 ---")
+            await bot.send_document(CHAT_ID, open(file_name, 'rb'), caption=msg)
 
-    except Exception as e:
-        print(f"오류 발생: {e}")
+    except Exception as e: print(f"오류: {e}")
 
 if __name__ == "__main__":
     asyncio.run(send_smart_report())
