@@ -10,7 +10,7 @@ from openpyxl.styles import Alignment, PatternFill, Font
 TOKEN = "8574978661:AAF5SXIgfpJlnAfN5ccSk0tJek_uSlCMBBo"
 CHAT_ID = "8564327930"
 
-# [주요 종목 한글 매핑]
+# [주요 종목 한글 매핑] (기존 리스트 유지)
 KR_NAMES = {
     'AAPL': '애플', 'MSFT': '마이크로소프트', 'NVDA': '엔비디아', 'AMZN': '아마존',
     'GOOGL': '알파벳A', 'GOOG': '알파벳C', 'META': '메타', 'TSLA': '테슬라',
@@ -43,12 +43,10 @@ async def fetch_us_stock(row, start_d, end_d, mode):
         if h.empty or len(h) < 2: return None
         
         if mode == 'daily':
-            # 화~토: 전날 종가 vs 당일 종가
             last_close = h.iloc[-1]['Close']
             prev_close = h.iloc[-2]['Close']
             ratio = round(((last_close - prev_close) / prev_close) * 100, 2)
         else:
-            # 일요일: 이번주 월요일 시가 vs 금요일 종가
             last_close = h.iloc[-1]['Close']
             first_open = h.iloc[0]['Open']
             ratio = round(((last_close - first_open) / first_open) * 100, 2)
@@ -66,46 +64,52 @@ async def fetch_us_stock(row, start_d, end_d, mode):
 async def send_us_report():
     bot = Bot(token=TOKEN)
     now = datetime.utcnow() + timedelta(hours=9)
-    day_of_week = now.weekday() # 0:월...6:일
+    day_of_week = now.weekday()
 
-    # 1. 날짜 및 모드 설정
-    if day_of_week == 6: # 일요일 실행
+    # [날짜 탐색 로직 강화]
+    # 오늘부터 과거 10일치를 긁어와서 실제 데이터가 존재하는 날짜들을 리스트업합니다.
+    try:
+        check_h = fdr.DataReader('AAPL', (now - timedelta(days=10)).strftime('%Y-%m-%d'), now.strftime('%Y-%m-%d'))
+        if check_h.empty:
+            print("네트워크 문제 혹은 API 응답 없음")
+            return
+        
+        # 실제 데이터가 있는 날짜들의 리스트
+        available_dates = check_h.index.strftime('%Y-%m-%d').tolist()
+    except:
+        print("데이터 조회 중 오류 발생")
+        return
+
+    if day_of_week == 6: # 일요일 실행 (주간)
         mode = 'weekly'
-        # 이번주 금요일(2일전)과 월요일(6일전)
-        friday = now - timedelta(days=2)
-        end_d = friday.strftime('%Y-%m-%d')
-        start_d = (friday - timedelta(days=4)).strftime('%Y-%m-%d')
+        end_d = available_dates[-1] # 가장 최근 거래일(금)
+        # 5거래일 전을 시작일로 (월요일)
+        start_idx = max(0, len(available_dates) - 5)
+        start_d = available_dates[start_idx]
         msg_header = f"🗓 [주간 통합] 미국장 리포트 ({start_d} ~ {end_d})"
-    else: # 평일 실행
+    else: # 평일 실행 (일일)
         mode = 'daily'
-        # 애플 데이터로 최근 영업일 2개(오늘, 어제) 확보
-        check_h = fdr.DataReader('AAPL', (now - timedelta(days=7)).strftime('%Y-%m-%d'), now.strftime('%Y-%m-%d'))
-        if check_h.empty: return
-        end_d = check_h.index[-1].strftime('%Y-%m-%d')
-        start_d = check_h.index[-2].strftime('%Y-%m-%d')
+        end_d = available_dates[-1] # 가장 최근 마감일
+        start_d = available_dates[-2] # 그 전날
         msg_header = f"🇺🇸 [전일 대비] 미국장 리포트 ({end_d} 기준)"
 
     try:
-        print(f"--- {mode} 분석 시작: {end_d} ---")
+        print(f"--- 분석 모드: {mode} / 대상 날짜: {end_d} ---")
         df_base = fdr.StockListing('NASDAQ')
         df_target = df_base.head(800)
 
         tasks = [fetch_us_stock(row, start_d, end_d, mode) for _, row in df_target.iterrows()]
         results = await asyncio.gather(*tasks)
-        
         df_final = pd.DataFrame([r for r in results if r is not None])
         
-        # 오류 방지: 데이터가 없을 경우 처리
         if df_final.empty:
-            print("분석된 데이터가 없습니다.")
+            print("수집된 종목 데이터가 없습니다.")
             return
 
-        # 필터링 (컬럼명 '등락률'로 통일)
         up_df = df_final[df_final['등락률'] >= 5].sort_values('등락률', ascending=False)
         down_df = df_final[df_final['등락률'] <= -5].sort_values('등락률', ascending=True)
 
-        file_name = f"{now.strftime('%m%d')}_나스닥_{mode}.xlsx"
-        # 한글 헤더 매핑
+        file_name = f"{now.strftime('%m%d')}_미국장_{mode}.xlsx"
         h_map = {'티커':'티커', '종목명':'종목명', '종가':'종가', '등락률':'등락률(%)', '산업':'산업'}
 
         with pd.ExcelWriter(file_name, engine='openpyxl') as writer:
@@ -113,7 +117,6 @@ async def send_us_report():
                 data.rename(columns=h_map).to_excel(writer, sheet_name=s_name, index=False)
                 ws = writer.sheets[s_name]
                 for row in range(2, ws.max_row + 1):
-                    # 가독성 로직
                     ratio_val = abs(float(ws.cell(row, 4).value or 0))
                     name_cell = ws.cell(row, 2)
                     if ratio_val >= 20: name_cell.fill = PatternFill("solid", fgColor="FFCC00")
@@ -125,12 +128,12 @@ async def send_us_report():
 
         async with bot:
             msg = (f"{msg_header}\n"
-                   f"📈 상승(5%↑): {len(up_df)}개 / 📉 하락(5%↓): {len(down_df)}개\n"
-                   f"💡 화-토: 일일 리포트 / 일: 주간(월-금) 리포트")
+                   f"📈 상승: {len(up_df)} / 📉 하락: {len(down_df)}\n"
+                   f"💡 실제 장 마감일 데이터를 자동으로 찾아 분석했습니다.")
             await bot.send_document(CHAT_ID, open(file_name, 'rb'), caption=msg)
 
     except Exception as e:
-        print(f"미국장 리포트 오류: {e}")
+        print(f"오류 발생: {e}")
 
 if __name__ == "__main__":
     asyncio.run(send_us_report())
