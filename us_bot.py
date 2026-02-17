@@ -30,7 +30,7 @@ KR_NAMES = {
     'CSX': 'CSX', 'ODFL': '올드 도미니언', 'KVUE': '켄뷰', 'EXC': '엑셀론',
     'BKR': '베이커 휴즈', 'GEHC': 'GE 헬스케어', 'CTAS': '신타스', 'WDAY': '워크데이',
     'TEAM': '아틀라시안', 'DDOG': '데이터독', 'MRVL': '마벨 테크놀로지', 'ABNB': '에어비앤비',
-    'ORCL': '오라클', 'CTSH': '코그니전트', 'TTD': '더 트레이드 데스크', 'ON': '온 세미컨덕터',
+    'ORCL': '오라클', 'CTSH': '코그니전트', 'TTD': '더 트레이드 Desk', 'ON': '온 세미컨덕터',
     'CEG': '컨스텔레이션 에너지', 'MDB': '몽고DB', 'ANSS': '앤시스', 'SPLK': '스플렁크',
     'FAST': '패스널', 'DASH': '도어대시', 'ZSC': '지스케일러', 'ILMN': '일루미나',
     'WBD': '워너 브라더스', 'AZN': '아스트라제네카', 'SGEN': '시애틀 제네틱스'
@@ -39,15 +39,16 @@ KR_NAMES = {
 async def fetch_us_stock(row, start_d, end_d, mode):
     try:
         symbol = row['Symbol']
+        # 개별 수집 시에도 시작일과 종료일을 리스트에서 받은 그대로 사용
         h = fdr.DataReader(symbol, start_d, end_d)
         if h.empty or len(h) < 2: return None
         
+        last_close = h.iloc[-1]['Close']
+        
         if mode == 'daily':
-            last_close = h.iloc[-1]['Close']
             prev_close = h.iloc[-2]['Close']
             ratio = round(((last_close - prev_close) / prev_close) * 100, 2)
         else:
-            last_close = h.iloc[-1]['Close']
             first_open = h.iloc[0]['Open']
             ratio = round(((last_close - first_open) / first_open) * 100, 2)
         
@@ -66,50 +67,64 @@ async def send_us_report():
     now = datetime.utcnow() + timedelta(hours=9)
     day_of_week = now.weekday()
 
-    # [날짜 탐색 로직 강화]
-    # 오늘부터 과거 10일치를 긁어와서 실제 데이터가 존재하는 날짜들을 리스트업합니다.
     try:
-        check_h = fdr.DataReader('AAPL', (now - timedelta(days=10)).strftime('%Y-%m-%d'), now.strftime('%Y-%m-%d'))
+        # 1. 기준이 되는 AAPL 데이터를 넉넉히 가져옴 (최근 15일)
+        check_h = fdr.DataReader('AAPL', (now - timedelta(days=15)).strftime('%Y-%m-%d'), now.strftime('%Y-%m-%d'))
         if check_h.empty:
-            print("네트워크 문제 혹은 API 응답 없음")
+            print("데이터 소스 응답 없음")
             return
         
-        # 실제 데이터가 있는 날짜들의 리스트
+        # 실제 거래가 발생한 날짜들만 추출
         available_dates = check_h.index.strftime('%Y-%m-%d').tolist()
-    except:
-        print("데이터 조회 중 오류 발생")
+    except Exception as e:
+        print(f"초기 세팅 오류: {e}")
         return
 
+    # 2. 요일에 따른 분석 구간 설정
     if day_of_week == 6: # 일요일 실행 (주간)
         mode = 'weekly'
-        end_d = available_dates[-1] # 가장 최근 거래일(금)
-        # 5거래일 전을 시작일로 (월요일)
+        end_d = available_dates[-1] 
+        # 이번 주 월요일(데이터상 5거래일 전)을 찾음
         start_idx = max(0, len(available_dates) - 5)
         start_d = available_dates[start_idx]
         msg_header = f"🗓 [주간 통합] 미국장 리포트 ({start_d} ~ {end_d})"
     else: # 평일 실행 (일일)
         mode = 'daily'
-        end_d = available_dates[-1] # 가장 최근 마감일
-        start_d = available_dates[-2] # 그 전날
-        msg_header = f"🇺🇸 [전일 대비] 미국장 리포트 ({end_d} 기준)"
+        # 가장 최근 마감일과 그 바로 직전 거래일
+        end_d = available_dates[-1]
+        start_d = available_dates[-2]
+        msg_header = f"🇺🇸 [마감] 미국장 리포트 ({end_d} 기준)"
 
     try:
-        print(f"--- 분석 모드: {mode} / 대상 날짜: {end_d} ---")
+        print(f"--- 분석 실행중: {end_d} (모드: {mode}) ---")
         df_base = fdr.StockListing('NASDAQ')
         df_target = df_base.head(800)
 
         tasks = [fetch_us_stock(row, start_d, end_d, mode) for _, row in df_target.iterrows()]
         results = await asyncio.gather(*tasks)
+        
+        # 수집된 데이터 병합
         df_final = pd.DataFrame([r for r in results if r is not None])
         
         if df_final.empty:
-            print("수집된 종목 데이터가 없습니다.")
+            # [긴급 백업] 만약 최신일 데이터가 아직 서버에 없다면, 그 전날 기준으로 한 번 더 시도
+            print("최신 데이터 업데이트 대기 중... 전일 데이터로 재시도합니다.")
+            end_d = available_dates[-2]
+            start_d = available_dates[-3]
+            tasks = [fetch_us_stock(row, start_d, end_d, mode) for _, row in df_target.iterrows()]
+            results = await asyncio.gather(*tasks)
+            df_final = pd.DataFrame([r for r in results if r is not None])
+            msg_header = f"🇺🇸 [전일] 미국장 리포트 ({end_d} 기준 - 최신장 업데이트 지연)"
+
+        if df_final.empty:
+            print("최종적으로 수집된 데이터가 없습니다.")
             return
 
+        # 3. 데이터 가공 및 전송
         up_df = df_final[df_final['등락률'] >= 5].sort_values('등락률', ascending=False)
         down_df = df_final[df_final['등락률'] <= -5].sort_values('등락률', ascending=True)
 
-        file_name = f"{now.strftime('%m%d')}_미국장_{mode}.xlsx"
+        file_name = f"{now.strftime('%m%d')}_US_{mode}.xlsx"
         h_map = {'티커':'티커', '종목명':'종목명', '종가':'종가', '등락률':'등락률(%)', '산업':'산업'}
 
         with pd.ExcelWriter(file_name, engine='openpyxl') as writer:
@@ -127,13 +142,12 @@ async def send_us_report():
                 for i in range(1, 6): ws.column_dimensions[chr(64+i)].width = 22
 
         async with bot:
-            msg = (f"{msg_header}\n"
-                   f"📈 상승: {len(up_df)} / 📉 하락: {len(down_df)}\n"
-                   f"💡 실제 장 마감일 데이터를 자동으로 찾아 분석했습니다.")
+            msg = f"{msg_header}\n\n📈 상승: {len(up_df)} / 📉 하락: {len(down_df)}"
             await bot.send_document(CHAT_ID, open(file_name, 'rb'), caption=msg)
+        print(f"전송 완료: {end_d}")
 
     except Exception as e:
-        print(f"오류 발생: {e}")
+        print(f"오류: {e}")
 
 if __name__ == "__main__":
     asyncio.run(send_us_report())
