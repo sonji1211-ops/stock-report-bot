@@ -10,7 +10,7 @@ from openpyxl.styles import Alignment, PatternFill, Font
 TOKEN = "8574978661:AAF5SXIgfpJlnAfN5ccSk0tJek_uSlCMBBo"
 CHAT_ID = "8564327930"
 
-# [주요 종목 한글 매핑] 지수님이 주신 리스트 (누락 없이 유지)
+# [주요 종목 한글 매핑]
 KR_NAMES = {
     'AAPL': '애플', 'MSFT': '마이크로소프트', 'NVDA': '엔비디아', 'AMZN': '아마존',
     'GOOGL': '알파벳A', 'GOOG': '알파벳C', 'META': '메타', 'TSLA': '테슬라',
@@ -36,23 +36,28 @@ KR_NAMES = {
     'WBD': '워너 브라더스', 'AZN': '아스트라제네카', 'SGEN': '시애틀 제네틱스'
 }
 
-async def fetch_us_stock(row, start_d, end_d):
-    """수집 단계에서 즉시 한글화 적용"""
+async def fetch_us_stock(row, start_d, end_d, mode):
+    """모드별 데이터 수집 (mode: 'daily' 또는 'weekly')"""
     try:
-        h = fdr.DataReader(row['Symbol'], start_d, end_d)
-        if len(h) < 2: return None
+        symbol = row['Symbol']
+        h = fdr.DataReader(symbol, start_d, end_d)
+        if h.empty or len(h) < 2: return None
         
-        last_close = h.iloc[-1]['Close']
-        prev_close = h.iloc[-2]['Close']
-        ratio = round(((last_close - prev_close) / prev_close) * 100, 2)
-        
-        # [한글화 포인트] KR_NAMES에서 찾고 없으면 원래 영어 이름 유지
-        korean_name = KR_NAMES.get(row['Symbol'], row['Name'])
+        if mode == 'daily':
+            # 일일 리포트: 전날 종가 대비 당일 종가 등락률
+            last_close = h.iloc[-1]['Close']
+            prev_close = h.iloc[-2]['Close']
+            ratio = round(((last_close - prev_close) / prev_close) * 100, 2)
+        else:
+            # 주간 리포트: 월요일 시가 대비 금요일 종가 전체 등락률
+            last_close = h.iloc[-1]['Close']
+            first_open = h.iloc[0]['Open']
+            ratio = round(((last_close - first_open) / first_open) * 100, 2)
         
         return {
-            '티커': row['Symbol'],
-            '종목명': korean_name,
-            '종가': last_close,
+            '티커': symbol,
+            '종목명': KR_NAMES.get(symbol, row.get('Name', symbol)),
+            '현재가/종가': last_close,
             '등락률(%)': ratio,
             '산업': row.get('Industry', '-')
         }
@@ -62,31 +67,49 @@ async def fetch_us_stock(row, start_d, end_d):
 async def send_us_report():
     bot = Bot(token=TOKEN)
     now = datetime.utcnow() + timedelta(hours=9)
-    end_d = now.strftime('%Y-%m-%d')
-    start_d = (now - timedelta(days=5)).strftime('%Y-%m-%d')
+    day_of_week = now.weekday() # 0:월, 1:화 ... 5:토, 6:일
+
+    # 1. 날짜 설정 및 모드 결정
+    if day_of_week == 6: # 일요일 실행 (주간 리포트: 월~금 데이터)
+        mode = 'weekly'
+        # 이번 주 금요일 찾기 (오늘(일)로부터 2일 전)
+        friday = now - timedelta(days=2)
+        end_d = friday.strftime('%Y-%m-%d')
+        # 이번 주 월요일 찾기 (금요일로부터 4일 전)
+        start_d = (friday - timedelta(days=4)).strftime('%Y-%m-%d')
+        msg_header = f"🗓 [주간] 미국장 리포트 ({start_d} ~ {end_d})"
+    else: # 화~토 실행 (일일 리포트: 전날 데이터)
+        mode = 'daily'
+        # 가장 최근 영업일 찾기 (최대 10일 전까지 검색)
+        end_d = start_d = ""
+        for i in range(1, 11):
+            target = now - timedelta(days=i)
+            test = fdr.DataReader('AAPL', target.strftime('%Y-%m-%d'), target.strftime('%Y-%m-%d'))
+            if not test.empty:
+                end_d = target.strftime('%Y-%m-%d')
+                start_d = (target - timedelta(days=5)).strftime('%Y-%m-%d') # 전일비 계산 위해 여유있게 확보
+                break
+        msg_header = f"🇺🇸 [일일] 미국장 리포트 ({end_d} 기준)"
 
     try:
+        print(f"--- {mode} 분석 시작 ({start_d} ~ {end_d}) ---")
         df_base = fdr.StockListing('NASDAQ')
-        if df_base is None or df_base.empty: return
+        df_target = df_base.head(800) # 상위 800개 집중 분석
 
-        # 상위 800개 병렬 수집
-        df_target = df_base.head(800) 
-        tasks = [fetch_us_stock(row, start_d, end_d) for _, row in df_target.iterrows()]
+        tasks = [fetch_us_stock(row, start_d, end_d, mode) for _, row in df_target.iterrows()]
         results = await asyncio.gather(*tasks)
-        
         df_final = pd.DataFrame([r for r in results if r is not None])
-        
-        # 상/하락 필터링 및 엑셀 생성 로직 (생략 없이 유지)
+
+        # 필터링 및 엑셀 생성
         up_df = df_final[df_final['등락률(%)'] >= 5].sort_values('등락률(%)', ascending=False)
         down_df = df_final[df_final['등락률(%)'] <= -5].sort_values('등락률(%)', ascending=True)
 
-        file_name = f"{now.strftime('%m%d')}_나스닥_리포트.xlsx"
+        file_name = f"{now.strftime('%m%d')}_미국장_{mode}.xlsx"
         with pd.ExcelWriter(file_name, engine='openpyxl') as writer:
             for s_name, data in [('나스닥_상승', up_df), ('나스닥_하락', down_df)]:
                 data.to_excel(writer, sheet_name=s_name, index=False)
                 ws = writer.sheets[s_name]
                 for row in range(2, ws.max_row + 1):
-                    # 가독성 및 스타일 (누락 방지)
                     ratio_val = abs(float(ws.cell(row, 4).value or 0))
                     name_cell = ws.cell(row, 2)
                     if ratio_val >= 20: name_cell.fill = PatternFill("solid", fgColor="FFCC00")
@@ -94,14 +117,15 @@ async def send_us_report():
                     ws.cell(row, 3).number_format = '#,##0.00'
                     ws.cell(row, 4).number_format = '0.00'
                     for c in range(1, 6): ws.cell(row, c).alignment = Alignment(horizontal='center')
-                for i in range(1, 6): ws.column_dimensions[chr(64+i)].width = 20
+                for i in range(1, 6): ws.column_dimensions[chr(64+i)].width = 25
 
         async with bot:
-            msg = (f"🇺🇸 {end_d} 나스닥 리포트 배달완료!\n\n"
+            msg = (f"{msg_header}\n\n"
                    f"📈 상승(5%↑): {len(up_df)}개\n"
-                   f"📉 하락(5%↓): {len(down_df)}개\n\n"
-                   f"💡 주요 종목 한글화 적용 완료")
+                   f"📉 하락(5%↓): {len(down_df)}개\n"
+                   f"💡 월~금 일괄조사 및 한글화 적용")
             await bot.send_document(CHAT_ID, open(file_name, 'rb'), caption=msg)
+        print(f"--- {mode} 리포트 전송 완료 ---")
 
     except Exception as e: print(f"오류: {e}")
 
