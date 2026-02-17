@@ -37,19 +37,16 @@ KR_NAMES = {
 }
 
 async def fetch_us_stock(row, start_d, end_d, mode):
-    """모드별 데이터 수집 (mode: 'daily' 또는 'weekly')"""
     try:
         symbol = row['Symbol']
         h = fdr.DataReader(symbol, start_d, end_d)
         if h.empty or len(h) < 2: return None
         
         if mode == 'daily':
-            # 일일 리포트: 전날 종가 대비 당일 종가 등락률
             last_close = h.iloc[-1]['Close']
             prev_close = h.iloc[-2]['Close']
             ratio = round(((last_close - prev_close) / prev_close) * 100, 2)
         else:
-            # 주간 리포트: 월요일 시가 대비 금요일 종가 전체 등락률
             last_close = h.iloc[-1]['Close']
             first_open = h.iloc[0]['Open']
             ratio = round(((last_close - first_open) / first_open) * 100, 2)
@@ -66,41 +63,42 @@ async def fetch_us_stock(row, start_d, end_d, mode):
 
 async def send_us_report():
     bot = Bot(token=TOKEN)
+    # 한국 시간 기준
     now = datetime.utcnow() + timedelta(hours=9)
-    day_of_week = now.weekday() # 0:월, 1:화 ... 5:토, 6:일
+    day_of_week = now.weekday() 
 
     # 1. 날짜 설정 및 모드 결정
-    if day_of_week == 6: # 일요일 실행 (주간 리포트: 월~금 데이터)
+    if day_of_week == 6: # 일요일
         mode = 'weekly'
-        # 이번 주 금요일 찾기 (오늘(일)로부터 2일 전)
         friday = now - timedelta(days=2)
         end_d = friday.strftime('%Y-%m-%d')
-        # 이번 주 월요일 찾기 (금요일로부터 4일 전)
         start_d = (friday - timedelta(days=4)).strftime('%Y-%m-%d')
         msg_header = f"🗓 [주간] 미국장 리포트 ({start_d} ~ {end_d})"
-    else: # 화~토 실행 (일일 리포트: 전날 데이터)
+    else: # 평일 (화~토)
         mode = 'daily'
-        # 가장 최근 영업일 찾기 (최대 10일 전까지 검색)
-        end_d = start_d = ""
-        for i in range(1, 11):
-            target = now - timedelta(days=i)
-            test = fdr.DataReader('AAPL', target.strftime('%Y-%m-%d'), target.strftime('%Y-%m-%d'))
-            if not test.empty:
-                end_d = target.strftime('%Y-%m-%d')
-                start_d = (target - timedelta(days=5)).strftime('%Y-%m-%d') # 전일비 계산 위해 여유있게 확보
-                break
+        # [수정 포인트] AAPL 데이터를 가져와서 실제 마지막 영업일을 찾음
+        # 한국 아침에 실행하므로, '오늘' 날짜까지의 데이터를 조회해서 가장 마지막 행을 사용
+        check_h = fdr.DataReader('AAPL', (now - timedelta(days=5)).strftime('%Y-%m-%d'), now.strftime('%Y-%m-%d'))
+        if check_h.empty:
+            print("데이터를 불러올 수 없습니다.")
+            return
+            
+        end_d = check_h.index[-1].strftime('%Y-%m-%d')
+        start_d = check_h.index[-2].strftime('%Y-%m-%d') # 전일비 계산용
+        
+        # 만약 한국 시간으로 새벽 0~5시 사이라면 어제 날짜가 나올 수 있음
         msg_header = f"🇺🇸 [일일] 미국장 리포트 ({end_d} 기준)"
 
     try:
-        print(f"--- {mode} 분석 시작 ({start_d} ~ {end_d}) ---")
+        print(f"--- 분석 대상 날짜: {end_d} ---")
         df_base = fdr.StockListing('NASDAQ')
-        df_target = df_base.head(800) # 상위 800개 집중 분석
+        df_target = df_base.head(800)
 
         tasks = [fetch_us_stock(row, start_d, end_d, mode) for _, row in df_target.iterrows()]
         results = await asyncio.gather(*tasks)
         df_final = pd.DataFrame([r for r in results if r is not None])
 
-        # 필터링 및 엑셀 생성
+        # 필터링 및 엑셀 생성 (기존 가독성 로직 유지)
         up_df = df_final[df_final['등락률(%)'] >= 5].sort_values('등락률(%)', ascending=False)
         down_df = df_final[df_final['등락률(%)'] <= -5].sort_values('등락률(%)', ascending=True)
 
@@ -120,12 +118,11 @@ async def send_us_report():
                 for i in range(1, 6): ws.column_dimensions[chr(64+i)].width = 25
 
         async with bot:
-            msg = (f"{msg_header}\n\n"
-                   f"📈 상승(5%↑): {len(up_df)}개\n"
-                   f"📉 하락(5%↓): {len(down_df)}개\n"
-                   f"💡 월~금 일괄조사 및 한글화 적용")
+            msg = (f"{msg_header}\n"
+                   f"📈 상승(5%↑): {len(up_df)}개 / 📉 하락(5%↓): {len(down_df)}개\n"
+                   f"💡 최신 장 데이터 업데이트 확인 완료")
             await bot.send_document(CHAT_ID, open(file_name, 'rb'), caption=msg)
-        print(f"--- {mode} 리포트 전송 완료 ---")
+        print("--- 전송 완료 ---")
 
     except Exception as e: print(f"오류: {e}")
 
