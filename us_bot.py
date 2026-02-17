@@ -37,24 +37,20 @@ KR_NAMES = {
 }
 
 async def fetch_us_stock(row, search_start, search_end, mode):
-    """지정한 기간의 데이터를 통째로 가져온 뒤 가장 최신 영업일 2개를 추출"""
     try:
         symbol = row['Symbol']
         h = fdr.DataReader(symbol, search_start, search_end)
         if h.empty or len(h) < 2: return None
         
-        # h의 인덱스(날짜) 중 가장 마지막 날짜가 기준일(end_d)이 됨
         last_idx = h.index[-1]
         last_close = h.loc[last_idx, 'Close']
         
         if mode == 'daily':
-            # 일일: 마지막 날 종가 vs 그 전날 종가
             prev_idx = h.index[-2]
             prev_close = h.loc[prev_idx, 'Close']
             ratio = round(((last_close - prev_close) / prev_close) * 100, 2)
             final_date = last_idx.strftime('%Y-%m-%d')
         else:
-            # 주간: 이번주 첫 거래일 시가 vs 마지막 거래일 종가
             first_open = h.iloc[0]['Open']
             ratio = round(((last_close - first_open) / first_open) * 100, 2)
             final_date = f"{h.index[0].strftime('%m%d')}~{h.index[-1].strftime('%m%d')}"
@@ -75,17 +71,14 @@ async def send_us_report():
     now = datetime.utcnow() + timedelta(hours=9)
     day_of_week = now.weekday()
 
-    # 조회 범위 설정 (오늘 기준 넉넉히 최근 10일치)
     search_end = now.strftime('%Y-%m-%d')
     search_start = (now - timedelta(days=10)).strftime('%Y-%m-%d')
-
-    # 요일에 따른 분석 모드
     mode = 'weekly' if day_of_week == 6 else 'daily'
 
     try:
         print(f"--- 분석 시작 (모드: {mode}) ---")
         df_base = fdr.StockListing('NASDAQ')
-        df_target = df_base.head(800) # 상위 800개
+        df_target = df_base.head(800)
 
         tasks = [fetch_us_stock(row, search_start, search_end, mode) for _, row in df_target.iterrows()]
         results = await asyncio.gather(*tasks)
@@ -96,35 +89,53 @@ async def send_us_report():
             print("수집된 데이터가 없습니다.")
             return
 
-        # 수집된 데이터 중 가장 많이 나타난 '기준일'을 실제 마감일로 확정
         most_common_date = df_raw['기준일'].value_counts().idxmax()
         df_final = df_raw[df_raw['기준일'] == most_common_date]
 
-        # 3. 데이터 가공
         up_df = df_final[df_final['등락률'] >= 5].sort_values('등락률', ascending=False)
         down_df = df_final[df_final['등락률'] <= -5].sort_values('등락률', ascending=True)
 
-        file_name = f"{now.strftime('%m%d')}_US_Report.xlsx"
+        file_name = f"{now.strftime('%m%d')}_미국장_리포트.xlsx"
         h_map = {'티커':'티커', '종목명':'종목명', '종가':'종가', '등락률':'등락률(%)', '산업':'산업'}
 
         with pd.ExcelWriter(file_name, engine='openpyxl') as writer:
             for s_name, data in [('상승_TOP', up_df), ('하락_TOP', down_df)]:
                 data[['티커','종목명','종가','등락률','산업']].rename(columns=h_map).to_excel(writer, sheet_name=s_name, index=False)
                 ws = writer.sheets[s_name]
+                
+                # 가독성 개선 1: 컬럼 너비 최적화
+                ws.column_dimensions['A'].width = 12  # 티커
+                ws.column_dimensions['B'].width = 35  # 종목명 (충분히 넓게)
+                ws.column_dimensions['C'].width = 15  # 종가
+                ws.column_dimensions['D'].width = 15  # 등락률
+                ws.column_dimensions['E'].width = 45  # 산업 (긴 텍스트 대비)
+
                 for row in range(2, ws.max_row + 1):
                     ratio_val = abs(float(ws.cell(row, 4).value or 0))
                     name_cell = ws.cell(row, 2)
-                    if ratio_val >= 20: name_cell.fill = PatternFill("solid", fgColor="FFCC00")
-                    elif ratio_val >= 10: name_cell.fill = PatternFill("solid", fgColor="FFFF00")
+                    
+                    # 가독성 개선 2: 종목명 강조 및 색상
+                    if ratio_val >= 20: 
+                        name_cell.fill = PatternFill("solid", fgColor="FFCC00")
+                        name_cell.font = Font(bold=True)
+                    elif ratio_val >= 10: 
+                        name_cell.fill = PatternFill("solid", fgColor="FFFF00")
+                    
                     ws.cell(row, 3).number_format = '#,##0.00'
                     ws.cell(row, 4).number_format = '0.00'
-                    for c in range(1, 6): ws.cell(row, c).alignment = Alignment(horizontal='center')
-                for i in range(1, 6): ws.column_dimensions[chr(64+i)].width = 22
+                    
+                    # 가독성 개선 3: 정렬 조절
+                    for c in range(1, 6):
+                        if c == 2: # 종목명은 왼쪽 정렬이 가독성이 좋음
+                            ws.cell(row, c).alignment = Alignment(horizontal='left', vertical='center', indent=1)
+                        else:
+                            ws.cell(row, c).alignment = Alignment(horizontal='center', vertical='center')
 
         async with bot:
-            msg = (f"🇺🇸 미국장 리포트 ({most_common_date})\n\n"
-                   f"📈 상승: {len(up_df)} / 📉 하락: {len(down_df)}\n"
-                   f"💡 데이터 존재 여부를 전 종목 전수조사하여 최신일 기준으로 생성했습니다.")
+            msg = (f"🇺🇸 미국 나스닥 리포트 ({most_common_date})\n\n"
+                   f"📈 상승(5%↑): {len(up_df)}개\n"
+                   f"📉 하락(5%↓): {len(down_df)}개\n\n"
+                   f"💡 종목명 셀 너비 확장 및 가독성 최적화 완료")
             await bot.send_document(CHAT_ID, open(file_name, 'rb'), caption=msg)
         print(f"전송 완료: {most_common_date}")
 
