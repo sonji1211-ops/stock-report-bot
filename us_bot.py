@@ -10,7 +10,7 @@ from openpyxl.styles import Alignment, PatternFill, Font
 TOKEN = "8574978661:AAF5SXIgfpJlnAfN5ccSk0tJek_uSlCMBBo"
 CHAT_ID = "8564327930"
 
-# [주요 종목 한글 매핑] (기존 리스트 유지)
+# [주요 종목 한글 매핑]
 KR_NAMES = {
     'AAPL': '애플', 'MSFT': '마이크로소프트', 'NVDA': '엔비디아', 'AMZN': '아마존',
     'GOOGL': '알파벳A', 'GOOG': '알파벳C', 'META': '메타', 'TSLA': '테슬라',
@@ -36,28 +36,36 @@ KR_NAMES = {
     'WBD': '워너 브라더스', 'AZN': '아스트라제네카', 'SGEN': '시애틀 제네틱스'
 }
 
-async def fetch_us_stock(row, start_d, end_d, mode):
+async def fetch_us_stock(row, search_start, search_end, mode):
+    """지정한 기간의 데이터를 통째로 가져온 뒤 가장 최신 영업일 2개를 추출"""
     try:
         symbol = row['Symbol']
-        # 개별 수집 시에도 시작일과 종료일을 리스트에서 받은 그대로 사용
-        h = fdr.DataReader(symbol, start_d, end_d)
+        h = fdr.DataReader(symbol, search_start, search_end)
         if h.empty or len(h) < 2: return None
         
-        last_close = h.iloc[-1]['Close']
+        # h의 인덱스(날짜) 중 가장 마지막 날짜가 기준일(end_d)이 됨
+        last_idx = h.index[-1]
+        last_close = h.loc[last_idx, 'Close']
         
         if mode == 'daily':
-            prev_close = h.iloc[-2]['Close']
+            # 일일: 마지막 날 종가 vs 그 전날 종가
+            prev_idx = h.index[-2]
+            prev_close = h.loc[prev_idx, 'Close']
             ratio = round(((last_close - prev_close) / prev_close) * 100, 2)
+            final_date = last_idx.strftime('%Y-%m-%d')
         else:
+            # 주간: 이번주 첫 거래일 시가 vs 마지막 거래일 종가
             first_open = h.iloc[0]['Open']
             ratio = round(((last_close - first_open) / first_open) * 100, 2)
+            final_date = f"{h.index[0].strftime('%m%d')}~{h.index[-1].strftime('%m%d')}"
         
         return {
             '티커': symbol,
             '종목명': KR_NAMES.get(symbol, row.get('Name', symbol)),
             '종가': last_close,
             '등락률': ratio,
-            '산업': row.get('Industry', '-')
+            '산업': row.get('Industry', '-'),
+            '기준일': final_date
         }
     except:
         return None
@@ -67,69 +75,41 @@ async def send_us_report():
     now = datetime.utcnow() + timedelta(hours=9)
     day_of_week = now.weekday()
 
-    try:
-        # 1. 기준이 되는 AAPL 데이터를 넉넉히 가져옴 (최근 15일)
-        check_h = fdr.DataReader('AAPL', (now - timedelta(days=15)).strftime('%Y-%m-%d'), now.strftime('%Y-%m-%d'))
-        if check_h.empty:
-            print("데이터 소스 응답 없음")
-            return
-        
-        # 실제 거래가 발생한 날짜들만 추출
-        available_dates = check_h.index.strftime('%Y-%m-%d').tolist()
-    except Exception as e:
-        print(f"초기 세팅 오류: {e}")
-        return
+    # 조회 범위 설정 (오늘 기준 넉넉히 최근 10일치)
+    search_end = now.strftime('%Y-%m-%d')
+    search_start = (now - timedelta(days=10)).strftime('%Y-%m-%d')
 
-    # 2. 요일에 따른 분석 구간 설정
-    if day_of_week == 6: # 일요일 실행 (주간)
-        mode = 'weekly'
-        end_d = available_dates[-1] 
-        # 이번 주 월요일(데이터상 5거래일 전)을 찾음
-        start_idx = max(0, len(available_dates) - 5)
-        start_d = available_dates[start_idx]
-        msg_header = f"🗓 [주간 통합] 미국장 리포트 ({start_d} ~ {end_d})"
-    else: # 평일 실행 (일일)
-        mode = 'daily'
-        # 가장 최근 마감일과 그 바로 직전 거래일
-        end_d = available_dates[-1]
-        start_d = available_dates[-2]
-        msg_header = f"🇺🇸 [마감] 미국장 리포트 ({end_d} 기준)"
+    # 요일에 따른 분석 모드
+    mode = 'weekly' if day_of_week == 6 else 'daily'
 
     try:
-        print(f"--- 분석 실행중: {end_d} (모드: {mode}) ---")
+        print(f"--- 분석 시작 (모드: {mode}) ---")
         df_base = fdr.StockListing('NASDAQ')
-        df_target = df_base.head(800)
+        df_target = df_base.head(800) # 상위 800개
 
-        tasks = [fetch_us_stock(row, start_d, end_d, mode) for _, row in df_target.iterrows()]
+        tasks = [fetch_us_stock(row, search_start, search_end, mode) for _, row in df_target.iterrows()]
         results = await asyncio.gather(*tasks)
         
-        # 수집된 데이터 병합
-        df_final = pd.DataFrame([r for r in results if r is not None])
+        df_raw = pd.DataFrame([r for r in results if r is not None])
         
-        if df_final.empty:
-            # [긴급 백업] 만약 최신일 데이터가 아직 서버에 없다면, 그 전날 기준으로 한 번 더 시도
-            print("최신 데이터 업데이트 대기 중... 전일 데이터로 재시도합니다.")
-            end_d = available_dates[-2]
-            start_d = available_dates[-3]
-            tasks = [fetch_us_stock(row, start_d, end_d, mode) for _, row in df_target.iterrows()]
-            results = await asyncio.gather(*tasks)
-            df_final = pd.DataFrame([r for r in results if r is not None])
-            msg_header = f"🇺🇸 [전일] 미국장 리포트 ({end_d} 기준 - 최신장 업데이트 지연)"
-
-        if df_final.empty:
-            print("최종적으로 수집된 데이터가 없습니다.")
+        if df_raw.empty:
+            print("수집된 데이터가 없습니다.")
             return
 
-        # 3. 데이터 가공 및 전송
+        # 수집된 데이터 중 가장 많이 나타난 '기준일'을 실제 마감일로 확정
+        most_common_date = df_raw['기준일'].value_counts().idxmax()
+        df_final = df_raw[df_raw['기준일'] == most_common_date]
+
+        # 3. 데이터 가공
         up_df = df_final[df_final['등락률'] >= 5].sort_values('등락률', ascending=False)
         down_df = df_final[df_final['등락률'] <= -5].sort_values('등락률', ascending=True)
 
-        file_name = f"{now.strftime('%m%d')}_US_{mode}.xlsx"
+        file_name = f"{now.strftime('%m%d')}_US_Report.xlsx"
         h_map = {'티커':'티커', '종목명':'종목명', '종가':'종가', '등락률':'등락률(%)', '산업':'산업'}
 
         with pd.ExcelWriter(file_name, engine='openpyxl') as writer:
             for s_name, data in [('상승_TOP', up_df), ('하락_TOP', down_df)]:
-                data.rename(columns=h_map).to_excel(writer, sheet_name=s_name, index=False)
+                data[['티커','종목명','종가','등락률','산업']].rename(columns=h_map).to_excel(writer, sheet_name=s_name, index=False)
                 ws = writer.sheets[s_name]
                 for row in range(2, ws.max_row + 1):
                     ratio_val = abs(float(ws.cell(row, 4).value or 0))
@@ -142,9 +122,11 @@ async def send_us_report():
                 for i in range(1, 6): ws.column_dimensions[chr(64+i)].width = 22
 
         async with bot:
-            msg = f"{msg_header}\n\n📈 상승: {len(up_df)} / 📉 하락: {len(down_df)}"
+            msg = (f"🇺🇸 미국장 리포트 ({most_common_date})\n\n"
+                   f"📈 상승: {len(up_df)} / 📉 하락: {len(down_df)}\n"
+                   f"💡 데이터 존재 여부를 전 종목 전수조사하여 최신일 기준으로 생성했습니다.")
             await bot.send_document(CHAT_ID, open(file_name, 'rb'), caption=msg)
-        print(f"전송 완료: {end_d}")
+        print(f"전송 완료: {most_common_date}")
 
     except Exception as e:
         print(f"오류: {e}")
