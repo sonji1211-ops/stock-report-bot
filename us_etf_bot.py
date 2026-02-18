@@ -10,9 +10,11 @@ from openpyxl.styles import Alignment, PatternFill, Font
 TOKEN = "8574978661:AAF5SXIgfpJlnAfN5ccSk0tJek_uSlCMBBo"
 CHAT_ID = "8564327930"
 
-# [전종목 리스트] 지수님이 주신 40여종 + 국장 + 코인 전수 검수 완료
+# [전종목 리스트] 환율 3종(엔화, 유로, 위안) 추가 완료
 ASSET_NAMES = {
-    'KS11': '코스피 지수', 'KQ11': '코스닥 지수', 'USD/KRW': '달러/원 환율',
+    'KS11': '코스피 지수', 'KQ11': '코스닥 지수', 
+    'USD/KRW': '달러/원 환율', 'JPY/KRW': '엔/원 환율', 
+    'EUR/KRW': '유로/원 환율', 'CNY/KRW': '위안/원 환율',
     '069500': 'KODEX 200', '252670': 'KODEX 200선물인버스2X', '305720': 'KODEX 2차전지산업',
     '455810': 'TIGER 미국배당다우존스', '462330': 'KODEX AI반도체핵심공정', '122630': 'KODEX 레버리지',
     'BTC-KRW': '비트코인', 'ETH-KRW': '이더리움', 'XRP-KRW': '리플(XRP)', 
@@ -32,15 +34,11 @@ ASSET_NAMES = {
 
 async def fetch_asset_data(symbol, s_date, e_date, mode):
     try:
-        # 국내 ETF(숫자 6자리)는 네이버 소스로 강제 고정
-        if symbol.isdigit():
-            df = fdr.DataReader(symbol, s_date, e_date)
-        else:
-            df = fdr.DataReader(symbol, s_date, e_date)
+        # 국내 ETF 및 환율 데이터 안정적 수집
+        df = fdr.DataReader(symbol, s_date, e_date)
 
         if df is None or df.empty or len(df) < 2: return None
         
-        # 마지막 두 행을 정확히 추출 (코인 등락률 계산의 핵심)
         last_c = float(df.iloc[-1]['Close'])
         prev_c = float(df.iloc[-2]['Close'])
         
@@ -62,7 +60,6 @@ async def fetch_asset_data(symbol, s_date, e_date, mode):
 async def send_etf_report():
     bot = Bot(token=TOKEN)
     now = datetime.utcnow() + timedelta(hours=9)
-    # 코인 등락률 누락 방지를 위해 데이터를 충분히(20일치) 가져옴
     s_date = (now - timedelta(days=20)).strftime('%Y-%m-%d')
     e_date = now.strftime('%Y-%m-%d')
     mode = 'weekly' if now.weekday() == 6 else 'daily'
@@ -86,7 +83,6 @@ async def send_etf_report():
         for row in range(1, ws.max_row + 1):
             for col in range(1, 5):
                 cell = ws.cell(row, col)
-                # 항목명(B)만 왼쪽, 나머지는 전부 '중앙 정렬'
                 if col == 2:
                     cell.alignment = Alignment(horizontal='left', vertical='center', indent=1)
                 else:
@@ -94,9 +90,9 @@ async def send_etf_report():
                 
                 if row > 1:
                     t = str(ws.cell(row, 1).value)
-                    # ₩ 기호 표시 대상 (코인, 국주, 국장지수)
-                    if '-KRW' in t or t.isdigit() or t in ['KS11', 'KQ11', 'USD/KRW']:
-                        ws.cell(row, 3).number_format = '"₩"#,##0'
+                    # 원화 기호 표시 대상: 코인, 국주, 국장지수, 모든 KRW 환율
+                    if '-KRW' in t or t.isdigit() or t in ['KS11', 'KQ11'] or '/KRW' in t:
+                        ws.cell(row, 3).number_format = '"₩"#,##0.00'
                     else:
                         ws.cell(row, 3).number_format = '#,##0.00'
                     
@@ -112,7 +108,7 @@ async def send_etf_report():
                         except: pass
 
     async with bot:
-        await bot.send_document(CHAT_ID, open(file_name, 'rb'), caption=f"🌍 전종목 통합 리포트 ({now.strftime('%Y-%m-%d')})\n✅ ₩기호 추가 / 중앙정렬 / 누락종목 복구 완료")
+        await bot.send_document(CHAT_ID, open(file_name, 'rb'), caption=f"🌍 환율 3종 추가 통합 리포트 ({now.strftime('%Y-%m-%d')})\n✅ 엔/유로/위안 환율 반영 및 원화 기호 적용")
 
 if __name__ == "__main__":
     asyncio.run(send_etf_report())
