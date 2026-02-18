@@ -10,11 +10,11 @@ from openpyxl.styles import Alignment, PatternFill, Font
 TOKEN = "8574978661:AAF5SXIgfpJlnAfN5ccSk0tJek_uSlCMBBo"
 CHAT_ID = "8564327930"
 
-# [전종목 리스트] 455810 제외 / 위안화(CNY/KRW) 포함
+# [전종목 리스트]
 ASSET_NAMES = {
     'KS11': '코스피 지수', 'KQ11': '코스닥 지수', 
     'USD/KRW': '달러/원 환율', 'JPY/KRW': '엔/원 환율', 
-    'EUR/KRW': '유로/원 환율', 'CNY/KRW': '위안/원 환율', # 위안화 항목
+    'EUR/KRW': '유로/원 환율', 'CNY/KRW': '위안/원 환율', 
     '069500': 'KODEX 200', '252670': 'KODEX 200선물인버스2X', '305720': 'KODEX 2차전지산업',
     '462330': 'KODEX AI반도체핵심공정', '122630': 'KODEX 레버리지',
     'BTC-KRW': '비트코인', 'ETH-KRW': '이더리움', 'XRP-KRW': '리플(XRP)', 
@@ -25,42 +25,41 @@ ASSET_NAMES = {
     'SMH': '반도체ETF(VanEck)', 'NVDL': '엔비디아(2배)', 'TSLL': '테슬라(2배)', 'CONL': '코인베이스(2배)',
     'SCHD': '슈드(배당성장)', 'JEPI': '제피(고배당)', 'ARKK': '아크혁신(캐시우드)',
     'TLT': '미국채20년(장기채)', 'TMF': '장기채강세(3배)', 'TMV': '장기채약세(3배)',
-    'XLF': '금융섹터', 'XLV': '헬스케어섹터', 'XLE': '에너지섹터', 'XLK': '기술주섹터', 
+    'XLF': '금융섹터', 'XLV': '헬스케어섹터', 'XLE': 'energy섹터', 'XLK': '기술주섹터', 
     'XLY': '임의소비재', 'XLP': '필수소비재', 'GDX': '금광업', 'GLD': '금선물',
     'VNQ': '리츠(부동산)', 'BITO': '비트코인ETF', 'FNGU': '빅테크플러스(3배)', 'BULZ': '빅테크성장(3배)',
     'VTI': '미국전체주식', 'VXUS': '미국외전세계', 'VT': '전세계주식',
     'GC=F': '금 선물', 'SI=F': '은 선물'
 }
 
-async def fetch_asset_data(symbol, s_date, mode):
+async def fetch_asset_data(symbol, s_date):
     try:
-        df = fdr.DataReader(symbol, s_date) 
+        # 1차 시도 (기본 티커)
+        df = fdr.DataReader(symbol, s_date)
+        
+        # 위안화 누락 방지 전용 로직 (실패 시 인베스팅/야후 대체 티커 시도)
+        if (df is None or df.empty) and symbol == 'CNY/KRW':
+            for alt_ticker in ['CNYKRW=X', 'FX_IDC:CNYKRW']:
+                df = fdr.DataReader(alt_ticker, s_date)
+                if df is not None and not df.empty: break
+            
         if df is None or df.empty or len(df) < 2: return None
         
         last_c = float(df.iloc[-1]['Close'])
         prev_c = float(df.iloc[-2]['Close'])
-        
-        ratio = ((last_c - prev_c) / prev_c) * 100
-        if mode != 'daily':
-            first_o = float(df.iloc[0]['Open'])
-            ratio = ((last_c - first_o) / first_o) * 100
+        ratio = round(((last_c - prev_c) / prev_c) * 100, 2)
             
-        return {
-            '티커': symbol, 
-            '항목명': ASSET_NAMES.get(symbol, symbol), 
-            '현재가': last_c, 
-            '등락률': round(ratio, 2)
-        }
+        return {'티커': symbol, '항목명': ASSET_NAMES.get(symbol, symbol), '현재가': last_c, '등락률': ratio}
     except:
         return None
 
-async def send_etf_report():
+async def send_report():
     bot = Bot(token=TOKEN)
     now = datetime.utcnow() + timedelta(hours=9)
+    # 데이터 확보를 위해 넉넉히 30일치 조회
     s_date = (now - timedelta(days=30)).strftime('%Y-%m-%d')
-    mode = 'weekly' if now.weekday() == 6 else 'daily'
 
-    tasks = [fetch_asset_data(s, s_date, mode) for s in ASSET_NAMES.keys()]
+    tasks = [fetch_asset_data(s, s_date) for s in ASSET_NAMES.keys()]
     results = await asyncio.gather(*tasks)
     df = pd.DataFrame([r for r in results if r is not None])
     
@@ -68,49 +67,40 @@ async def send_etf_report():
 
     file_name = f"{now.strftime('%m%d')}_종합_리포트.xlsx"
     yellow_fill = PatternFill(start_color='FFFF00', end_color='FFFF00', fill_type='solid')
-    bold_font = Font(bold=True)
 
     with pd.ExcelWriter(file_name, engine='openpyxl') as writer:
         df[['티커','항목명','현재가','등락률']].rename(columns={'등락률':'등락률(%)'}).to_excel(writer, sheet_name='현황', index=False)
         ws = writer.sheets['현황']
         
+        # 열 너비 조정
         ws.column_dimensions['A'].width = 15
         ws.column_dimensions['B'].width = 30
         ws.column_dimensions['C'].width = 25
         ws.column_dimensions['D'].width = 15
-        
+
         for row in range(1, ws.max_row + 1):
-            # 등락률 값 가져오기 (헤더 제외)
-            ratio_val = 0
-            if row > 1:
-                try:
-                    ratio_val = float(ws.cell(row, 4).value)
-                except: pass
-
+            # 1. 모든 셀 가운데 정렬 적용 (종목 포함)
             for col in range(1, 5):
-                cell = ws.cell(row, col)
-                # 3% 이상 등락 시 해당 행 노란색 강조 (헤더 제외)
-                if row > 1 and abs(ratio_val) >= 3:
-                    cell.fill = yellow_fill
-                    cell.font = bold_font
+                ws.cell(row, col).alignment = Alignment(horizontal='center', vertical='center')
 
-                if col == 2:
-                    cell.alignment = Alignment(horizontal='left', vertical='center', indent=1)
-                else:
-                    cell.alignment = Alignment(horizontal='center', vertical='center')
+            if row > 1:
+                ratio_val = abs(float(ws.cell(row, 4).value))
+                # 2. 3% 이상 강조 (노란색 배경)
+                if ratio_val >= 3:
+                    for col in range(1, 5):
+                        ws.cell(row, col).fill = yellow_fill
+                        ws.cell(row, col).font = Font(bold=True)
                 
-                if row > 1:
-                    t = str(ws.cell(row, 1).value)
-                    if col == 3:
-                        if '-KRW' in t or t.isdigit() or t in ['KS11', 'KQ11'] or '/KRW' in t:
-                            cell.number_format = '"₩"#,##0.00'
-                        else:
-                            cell.number_format = '#,##0.00'
-                    if col == 4:
-                        cell.number_format = '0.00'
+                # 3. 통화 기호 적용
+                t = str(ws.cell(row, 1).value)
+                if '-KRW' in t or t.isdigit() or '/KRW' in t or 'KS11' in t:
+                    ws.cell(row, 3).number_format = '"₩"#,##0.00'
+                else:
+                    ws.cell(row, 3).number_format = '#,##0.00'
 
     async with bot:
-        await bot.send_document(CHAT_ID, open(file_name, 'rb'), caption=f"🌍 종합 자산 리포트 ({now.strftime('%Y-%m-%d')})\n✅ 환율 및 주요 ETF (3% 이상 강조 완료)")
+        await bot.send_document(CHAT_ID, open(file_name, 'rb'), 
+                               caption=f"🌍 종합 리포트 ({now.strftime('%Y-%m-%d')})\n✅ 위안화 보강 및 전 종목 가운데 정렬 완료")
 
 if __name__ == "__main__":
-    asyncio.run(send_etf_report())
+    asyncio.run(send_report())
