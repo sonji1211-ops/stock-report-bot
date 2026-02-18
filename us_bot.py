@@ -135,7 +135,7 @@ async def send_us_report():
             msg = (f"🇺🇸 미국 나스닥 리포트 ({most_common_date})\n\n"
                    f"📈 상승(5%↑): {len(up_df)}개\n"
                    f"📉 하락(5%↓): {len(down_df)}개\n\n"
-                   f"💡 종목명 셀 너비 확장 및 가독성 최적화 완료")
+                   f"💡가독성 최적화 완료")
             await bot.send_document(CHAT_ID, open(file_name, 'rb'), caption=msg)
         print(f"전송 완료: {most_common_date}")
 
