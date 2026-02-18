@@ -10,13 +10,13 @@ from openpyxl.styles import Alignment, PatternFill, Font
 TOKEN = "8574978661:AAF5SXIgfpJlnAfN5ccSk0tJek_uSlCMBBo"
 CHAT_ID = "8564327930"
 
-# [전종목 리스트] 위안화(CNY/KRW) 포함 환율 라인업 재정비
+# [전종목 리스트] 455810 제외 / 위안화(CNY/KRW) 포함
 ASSET_NAMES = {
     'KS11': '코스피 지수', 'KQ11': '코스닥 지수', 
     'USD/KRW': '달러/원 환율', 'JPY/KRW': '엔/원 환율', 
-    'EUR/KRW': '유로/원 환율', 'CNY/KRW': '위안/원 환율',  # 위안화 티커 재확인
+    'EUR/KRW': '유로/원 환율', 'CNY/KRW': '위안/원 환율', # 위안화 항목
     '069500': 'KODEX 200', '252670': 'KODEX 200선물인버스2X', '305720': 'KODEX 2차전지산업',
-    '455810': 'TIGER 미국배당다우존스', '462330': 'KODEX AI반도체핵심공정', '122630': 'KODEX 레버리지',
+    '462330': 'KODEX AI반도체핵심공정', '122630': 'KODEX 레버리지',
     'BTC-KRW': '비트코인', 'ETH-KRW': '이더리움', 'XRP-KRW': '리플(XRP)', 
     'SOL-KRW': '솔라나(SOL)', 'USDT-KRW': '테더(USDT)',
     'QQQ': '나스닥100', 'TQQQ': '나스닥100(3배)', 'SQQQ': '나스닥100인버스(3배)', 'QLD': '나스닥100(2배)',
@@ -32,11 +32,9 @@ ASSET_NAMES = {
     'GC=F': '금 선물', 'SI=F': '은 선물'
 }
 
-async def fetch_asset_data(symbol, s_date, e_date, mode):
+async def fetch_asset_data(symbol, s_date, mode):
     try:
-        # 환율 데이터의 경우 소스가 불안정할 수 있어 조회를 넉넉하게 시도
         df = fdr.DataReader(symbol, s_date) 
-
         if df is None or df.empty or len(df) < 2: return None
         
         last_c = float(df.iloc[-1]['Close'])
@@ -51,8 +49,7 @@ async def fetch_asset_data(symbol, s_date, e_date, mode):
             '티커': symbol, 
             '항목명': ASSET_NAMES.get(symbol, symbol), 
             '현재가': last_c, 
-            '등락률': round(ratio, 2), 
-            '기준일': df.index[-1].strftime('%Y-%m-%d')
+            '등락률': round(ratio, 2)
         }
     except:
         return None
@@ -60,18 +57,19 @@ async def fetch_asset_data(symbol, s_date, e_date, mode):
 async def send_etf_report():
     bot = Bot(token=TOKEN)
     now = datetime.utcnow() + timedelta(hours=9)
-    # 위안화 등 환율 누락 방지를 위해 조회 기간을 30일로 확장
     s_date = (now - timedelta(days=30)).strftime('%Y-%m-%d')
-    e_date = now.strftime('%Y-%m-%d')
     mode = 'weekly' if now.weekday() == 6 else 'daily'
 
-    tasks = [fetch_asset_data(s, s_date, e_date, mode) for s in ASSET_NAMES.keys()]
+    tasks = [fetch_asset_data(s, s_date, mode) for s in ASSET_NAMES.keys()]
     results = await asyncio.gather(*tasks)
     df = pd.DataFrame([r for r in results if r is not None])
     
     if df.empty: return
 
     file_name = f"{now.strftime('%m%d')}_종합_리포트.xlsx"
+    yellow_fill = PatternFill(start_color='FFFF00', end_color='FFFF00', fill_type='solid')
+    bold_font = Font(bold=True)
+
     with pd.ExcelWriter(file_name, engine='openpyxl') as writer:
         df[['티커','항목명','현재가','등락률']].rename(columns={'등락률':'등락률(%)'}).to_excel(writer, sheet_name='현황', index=False)
         ws = writer.sheets['현황']
@@ -82,8 +80,20 @@ async def send_etf_report():
         ws.column_dimensions['D'].width = 15
         
         for row in range(1, ws.max_row + 1):
+            # 등락률 값 가져오기 (헤더 제외)
+            ratio_val = 0
+            if row > 1:
+                try:
+                    ratio_val = float(ws.cell(row, 4).value)
+                except: pass
+
             for col in range(1, 5):
                 cell = ws.cell(row, col)
+                # 3% 이상 등락 시 해당 행 노란색 강조 (헤더 제외)
+                if row > 1 and abs(ratio_val) >= 3:
+                    cell.fill = yellow_fill
+                    cell.font = bold_font
+
                 if col == 2:
                     cell.alignment = Alignment(horizontal='left', vertical='center', indent=1)
                 else:
@@ -91,16 +101,16 @@ async def send_etf_report():
                 
                 if row > 1:
                     t = str(ws.cell(row, 1).value)
-                    # 위안화(/KRW) 포함 원화 표시 대상 설정
-                    if '-KRW' in t or t.isdigit() or t in ['KS11', 'KQ11'] or '/KRW' in t:
-                        ws.cell(row, 3).number_format = '"₩"#,##0.00'
-                    else:
-                        ws.cell(row, 3).number_format = '#,##0.00'
-                    
-                    ws.cell(row, 4).number_format = '0.00'
+                    if col == 3:
+                        if '-KRW' in t or t.isdigit() or t in ['KS11', 'KQ11'] or '/KRW' in t:
+                            cell.number_format = '"₩"#,##0.00'
+                        else:
+                            cell.number_format = '#,##0.00'
+                    if col == 4:
+                        cell.number_format = '0.00'
 
     async with bot:
-        await bot.send_document(CHAT_ID, open(file_name, 'rb'), caption=f"🌍 통합 리포트 ({now.strftime('%Y-%m-%d')})\n✅ 주요 지수 및 ETF, 가상화폐, 환율 정리")
+        await bot.send_document(CHAT_ID, open(file_name, 'rb'), caption=f"🌍 종합 자산 리포트 ({now.strftime('%Y-%m-%d')})\n✅ 환율 및 주요 ETF (3% 이상 강조 완료)")
 
 if __name__ == "__main__":
     asyncio.run(send_etf_report())
