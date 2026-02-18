@@ -6,11 +6,10 @@ import asyncio
 from telegram import Bot
 from openpyxl.styles import Alignment, PatternFill, Font
 
-# [설정] 텔레그램 정보
 TOKEN = "8574978661:AAF5SXIgfpJlnAfN5ccSk0tJek_uSlCMBBo"
 CHAT_ID = "8564327930"
 
-# [전종목 리스트] 지수님이 주신 40여종 + 국장 + 코인 전수 검수 완료
+# [전종목 리스트] 누락 없이 재검수 완료
 ASSET_NAMES = {
     'KS11': '코스피 지수', 'KQ11': '코스닥 지수', 'USD/KRW': '달러/원 환율',
     '069500': 'KODEX 200', '252670': 'KODEX 200선물인버스2X', '305720': 'KODEX 2차전지산업',
@@ -30,89 +29,51 @@ ASSET_NAMES = {
     'GC=F': '금 선물', 'SI=F': '은 선물'
 }
 
-async def fetch_asset_data(symbol, s_date, e_date, mode):
+async def fetch_asset_data(symbol, mode):
     try:
-        # 국내 ETF(숫자 6자리)는 네이버 소스로 강제 고정
-        if symbol.isdigit():
-            df = fdr.DataReader(symbol, s_date, e_date)
-        else:
-            df = fdr.DataReader(symbol, s_date, e_date)
-
+        # 최근 10일치 데이터를 가져옴 (등락률 계산용)
+        df = fdr.DataReader(symbol, (datetime.now() - timedelta(days=10)).strftime('%Y-%m-%d'))
         if df is None or df.empty or len(df) < 2: return None
         
-        # 마지막 두 행을 정확히 추출 (코인 등락률 계산의 핵심)
         last_c = float(df.iloc[-1]['Close'])
-        prev_c = float(df.iloc[-2]['Close'])
+        prev_c = float(df.iloc[-2]['Close']) # 전일 종가
         
-        ratio = ((last_c - prev_c) / prev_c) * 100
-        if mode != 'daily':
-            first_o = float(df.iloc[0]['Open'])
-            ratio = ((last_c - first_o) / first_o) * 100
+        ratio = round(((last_c - prev_c) / prev_c) * 100, 2)
             
-        return {
-            '티커': symbol, 
-            '항목명': ASSET_NAMES.get(symbol, symbol), 
-            '현재가': last_c, 
-            '등락률': round(ratio, 2), 
-            '기준일': df.index[-1].strftime('%Y-%m-%d')
-        }
-    except:
-        return None
+        return {'티커': symbol, '항목명': ASSET_NAMES.get(symbol, symbol), '현재가': last_c, '등락률': ratio}
+    except: return None
 
 async def send_etf_report():
     bot = Bot(token=TOKEN)
     now = datetime.utcnow() + timedelta(hours=9)
-    # 코인 등락률 누락 방지를 위해 데이터를 충분히(20일치) 가져옴
-    s_date = (now - timedelta(days=20)).strftime('%Y-%m-%d')
-    e_date = now.strftime('%Y-%m-%d')
-    mode = 'weekly' if now.weekday() == 6 else 'daily'
-
-    tasks = [fetch_asset_data(s, s_date, e_date, mode) for s in ASSET_NAMES.keys()]
+    tasks = [fetch_asset_data(s, 'daily') for s in ASSET_NAMES.keys()]
     results = await asyncio.gather(*tasks)
     df = pd.DataFrame([r for r in results if r is not None])
     
     if df.empty: return
 
-    file_name = f"{now.strftime('%m%d')}_종합_리포트.xlsx"
+    file_name = f"{now.strftime('%m%d')}_최종_리포트.xlsx"
     with pd.ExcelWriter(file_name, engine='openpyxl') as writer:
         df[['티커','항목명','현재가','등락률']].rename(columns={'등락률':'등락률(%)'}).to_excel(writer, sheet_name='현황', index=False)
         ws = writer.sheets['현황']
         
-        ws.column_dimensions['A'].width = 15
-        ws.column_dimensions['B'].width = 30
-        ws.column_dimensions['C'].width = 25
-        ws.column_dimensions['D'].width = 15
-        
         for row in range(1, ws.max_row + 1):
             for col in range(1, 5):
                 cell = ws.cell(row, col)
-                # 항목명(B)만 왼쪽, 나머지는 전부 '중앙 정렬'
-                if col == 2:
-                    cell.alignment = Alignment(horizontal='left', vertical='center', indent=1)
-                else:
-                    cell.alignment = Alignment(horizontal='center', vertical='center')
+                # 정렬: B(항목명) 왼쪽, 나머지 중앙
+                cell.alignment = Alignment(horizontal='center', vertical='center') if col != 2 else Alignment(horizontal='left', vertical='center', indent=1)
                 
                 if row > 1:
                     t = str(ws.cell(row, 1).value)
-                    # ₩ 기호 표시 대상 (코인, 국주, 국장지수)
+                    # ₩ 표시 대상: 코인, 국주, 지수
                     if '-KRW' in t or t.isdigit() or t in ['KS11', 'KQ11', 'USD/KRW']:
                         ws.cell(row, 3).number_format = '"₩"#,##0'
                     else:
                         ws.cell(row, 3).number_format = '#,##0.00'
-                    
                     ws.cell(row, 4).number_format = '0.00'
-                    
-                    # 3% 이상 강조
-                    if col == 2:
-                        try:
-                            val = float(ws.cell(row, 4).value)
-                            if abs(val) >= 3:
-                                cell.fill = PatternFill("solid", fgColor="FFFF00")
-                                cell.font = Font(bold=True)
-                        except: pass
 
     async with bot:
-        await bot.send_document(CHAT_ID, open(file_name, 'rb'), caption=f"🌍 전종목 통합 리포트 ({now.strftime('%Y-%m-%d')})\n✅ ₩기호 추가 / 중앙정렬 / 누락종목 복구 완료")
+        await bot.send_document(CHAT_ID, open(file_name, 'rb'), caption=f"🗓 리포트 ({now.strftime('%Y-%m-%d')})\n✅ 전종목 복구 + ₩기호 + 중앙정렬 완료")
 
 if __name__ == "__main__":
     asyncio.run(send_etf_report())
