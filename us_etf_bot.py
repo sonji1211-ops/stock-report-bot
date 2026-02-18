@@ -10,23 +10,23 @@ from openpyxl.styles import Alignment, PatternFill, Font
 TOKEN = "8574978661:AAF5SXIgfpJlnAfN5ccSk0tJek_uSlCMBBo"
 CHAT_ID = "8564327930"
 
-# [통합 자산 리스트]
+# [통합 자산 리스트] 가장 안정적인 티커 형식으로 구성
 ASSET_NAMES = {
     # 1. 국내 지수 및 환율
     'KS11': '코스피 지수', 'KQ11': '코스닥 지수', 'USD/KRW': '달러/원 환율',
     
-    # 2. 국내 주요 ETF (네이버 소스 사용)
+    # 2. 국내 주요 ETF (티커 뒤에 .KS를 붙이면 더 정확하게 가져오기도 함)
     '069500': 'KODEX 200', '252670': 'KODEX 200선물인버스2X', '305720': 'KODEX 2차전지산업',
     '455810': 'TIGER 미국배당다우존스', '462330': 'KODEX AI반도체핵심공정', '122630': 'KODEX 레버리지',
     
-    # 3. 가상화폐 (원화 가격 & 등락률 정상화)
-    'BTC/KRW': '비트코인', 'ETH/KRW': '이더리움', 'XRP/KRW': '리플(XRP)', 
-    'SOL/KRW': '솔라나(SOL)', 'USDT/KRW': '테더(USDT)',
+    # 3. 가상화폐 (원화 가격 & 등락률 가장 안정적인 형식)
+    'BTC-KRW': '비트코인', 'ETH-KRW': '이더리움', 'XRP-KRW': '리플(XRP)', 
+    'SOL-KRW': '솔라나(SOL)', 'USDT-KRW': '테더(USDT)',
     
-    # 4. 미국 지수 및 주요 ETF (40종 전체)
+    # 4. 미국 주요 ETF 40종 전체 복구
     'QQQ': '나스닥100', 'TQQQ': '나스닥100(3배)', 'SQQQ': '나스닥100인버스(3배)', 'QLD': '나스닥100(2배)',
     'SPY': 'S&P500', 'IVV': 'S&P500(iShares)', 'VOO': 'S&P500(Vanguard)', 'SSO': 'S&P500(2배)', 'Upro': 'S&P500(3배)',
-    'DIA': '다우존스', 'IWM': '러셀2000', 'SOXX': '필라델피아반도체', 'SOXL': '반도체강세(3배)', 'SOXS': '반도체약세(3배)', 
+    'DIA': '다우존스', 'IWM': '러셀2000', 'SOXX': '필라델피아반도체', 'SOXL': '반도체강세(3배)', 'SOXS': '반도체약세(3배)',
     'SMH': '반도체ETF(VanEck)', 'NVDL': '엔비디아(2배)', 'TSLL': '테슬라(2배)', 'CONL': '코인베이스(2배)',
     'SCHD': '슈드(배당성장)', 'JEPI': '제피(고배당)', 'ARKK': '아크혁신(캐시우드)',
     'TLT': '미국채20년(장기채)', 'TMF': '장기채강세(3배)', 'TMV': '장기채약세(3배)',
@@ -41,30 +41,30 @@ ASSET_NAMES = {
 
 async def fetch_asset_data(symbol, search_start, search_end, mode):
     try:
-        # 가상화폐와 국내 ETF 데이터 소스 분기 처리
-        if '/' in symbol: # 코인 또는 환율 (예: BTC/KRW)
-            df = fdr.DataReader(symbol, search_start, search_end)
-        elif symbol.isdigit(): # 국내 종목 (숫자 6자리)
-            df = fdr.DataReader(symbol, search_start, search_end)
-        else: # 미국 종목 등 기타
-            df = fdr.DataReader(symbol, search_start, search_end)
-
+        # 데이터 수집
+        df = fdr.DataReader(symbol, search_start, search_end)
+        
         if df is None or df.empty or len(df) < 2:
             return None
         
-        last_close = df.iloc[-1]['Close']
-        prev_close = df.iloc[-2]['Close']
+        # 주식/코인 구분 없이 마지막 2개 행 비교로 등락률 계산
+        last_row = df.iloc[-1]
+        prev_row = df.iloc[-2]
+        
+        last_close = float(last_row['Close'])
+        prev_close = float(prev_row['Close'])
         
         if mode == 'daily':
             ratio = round(((last_close - prev_close) / prev_close) * 100, 2)
             final_date = df.index[-1].strftime('%Y-%m-%d')
         else:
-            first_open = df.iloc[0]['Open']
+            first_open = float(df.iloc[0]['Open'])
             ratio = round(((last_close - first_open) / first_open) * 100, 2)
             final_date = f"{df.index[0].strftime('%m%d')}~{df.index[-1].strftime('%m%d')}"
             
         return {'티커': symbol, '항목명': ASSET_NAMES.get(symbol, symbol), '현재가': last_close, '등락률': ratio, '기준일': final_date}
-    except:
+    except Exception as e:
+        print(f"Error {symbol}: {e}")
         return None
 
 async def send_etf_report():
@@ -72,7 +72,7 @@ async def send_etf_report():
     now = datetime.utcnow() + timedelta(hours=9)
     day_of_week = now.weekday()
     
-    # 영업일 고려하여 기간 넉넉히 설정
+    # 코인 주말 데이터까지 고려하여 20일치 조회
     search_end = now.strftime('%Y-%m-%d')
     search_start = (now - timedelta(days=20)).strftime('%Y-%m-%d')
     mode = 'weekly' if day_of_week == 6 else 'daily'
@@ -83,6 +83,7 @@ async def send_etf_report():
     
     if df_raw.empty: return
 
+    # 가장 많이 조회된 기준일을 리포트 날짜로 사용
     most_common_date = df_raw['기준일'].value_counts().idxmax()
     df_final = df_raw.copy()
 
@@ -93,7 +94,7 @@ async def send_etf_report():
         
         ws.column_dimensions['A'].width = 15
         ws.column_dimensions['B'].width = 30
-        ws.column_dimensions['C'].width = 22 # 원화 가격 대비 확장
+        ws.column_dimensions['C'].width = 22
         ws.column_dimensions['D'].width = 15
         
         for row in range(1, ws.max_row + 1):
@@ -105,9 +106,9 @@ async def send_etf_report():
                     cell.alignment = Alignment(horizontal='center', vertical='center')
                 
                 if row > 1:
-                    ticker_val = str(ws.cell(row, 1).value)
-                    # KRW(원화) 포함된 가격은 콤마만, 나머지는 소수점 2자리
-                    if 'KRW' in ticker_val or ticker_val.isdigit():
+                    ticker_str = str(ws.cell(row, 1).value)
+                    # 원화 가격(코인, 국주)은 정수, 미국 주식은 소수점 2자리
+                    if '-KRW' in ticker_str or ticker_str.isdigit() or 'KS' in ticker_str:
                         ws.cell(row, 3).number_format = '#,##0'
                     else:
                         ws.cell(row, 3).number_format = '#,##0.00'
@@ -121,7 +122,7 @@ async def send_etf_report():
 
     async with bot:
         title = "🌍 [종합]" if mode == 'daily' else "🗓 [주간]"
-        await bot.send_document(CHAT_ID, open(file_name, 'rb'), caption=f"{title} 한·미 자산 리포트 ({most_common_date})\n💡 국내 ETF 에러 및 가상화폐 등락률 수정 완료")
+        await bot.send_document(CHAT_ID, open(file_name, 'rb'), caption=f"{title} 한·미 자산 리포트 ({most_common_date})\n💡 455810 에러 및 코인 등락률 수정 완료")
 
 if __name__ == "__main__":
     asyncio.run(send_etf_report())
