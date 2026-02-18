@@ -34,14 +34,11 @@ ASSET_NAMES = {
 
 async def fetch_asset_data(symbol, s_date):
     try:
-        # 1차 시도 (기본 티커)
         df = fdr.DataReader(symbol, s_date)
         
-        # 위안화 누락 방지 전용 로직 (실패 시 인베스팅/야후 대체 티커 시도)
+        # 위안화 누락 방지: 첫 번째 티커 실패 시 대체 티커 시도
         if (df is None or df.empty) and symbol == 'CNY/KRW':
-            for alt_ticker in ['CNYKRW=X', 'FX_IDC:CNYKRW']:
-                df = fdr.DataReader(alt_ticker, s_date)
-                if df is not None and not df.empty: break
+            df = fdr.DataReader('CNYKRW=X', s_date)
             
         if df is None or df.empty or len(df) < 2: return None
         
@@ -56,7 +53,6 @@ async def fetch_asset_data(symbol, s_date):
 async def send_report():
     bot = Bot(token=TOKEN)
     now = datetime.utcnow() + timedelta(hours=9)
-    # 데이터 확보를 위해 넉넉히 30일치 조회
     s_date = (now - timedelta(days=30)).strftime('%Y-%m-%d')
 
     tasks = [fetch_asset_data(s, s_date) for s in ASSET_NAMES.keys()]
@@ -72,35 +68,39 @@ async def send_report():
         df[['티커','항목명','현재가','등락률']].rename(columns={'등락률':'등락률(%)'}).to_excel(writer, sheet_name='현황', index=False)
         ws = writer.sheets['현황']
         
-        # 열 너비 조정
         ws.column_dimensions['A'].width = 15
         ws.column_dimensions['B'].width = 30
         ws.column_dimensions['C'].width = 25
         ws.column_dimensions['D'].width = 15
 
         for row in range(1, ws.max_row + 1):
-            # 1. 모든 셀 가운데 정렬 적용 (종목 포함)
+            # [수정] 모든 셀 가운데 정렬 (종목명 포함)
             for col in range(1, 5):
                 ws.cell(row, col).alignment = Alignment(horizontal='center', vertical='center')
 
             if row > 1:
-                ratio_val = abs(float(ws.cell(row, 4).value))
-                # 2. 3% 이상 강조 (노란색 배경)
+                # [에러 방지] 빈 값 검사 후 숫자로 변환
+                val = ws.cell(row, 4).value
+                ratio_val = abs(float(val)) if val is not None and val != '' else 0
+
+                # 3% 이상 강조
                 if ratio_val >= 3:
                     for col in range(1, 5):
                         ws.cell(row, col).fill = yellow_fill
                         ws.cell(row, col).font = Font(bold=True)
                 
-                # 3. 통화 기호 적용
+                # 원화 표시 대상
                 t = str(ws.cell(row, 1).value)
-                if '-KRW' in t or t.isdigit() or '/KRW' in t or 'KS11' in t:
-                    ws.cell(row, 3).number_format = '"₩"#,##0.00'
-                else:
-                    ws.cell(row, 3).number_format = '#,##0.00'
+                if col == 4: # 루프 내 마지막 컬럼 처리 시 서식 적용
+                    if '-KRW' in t or t.isdigit() or '/KRW' in t or 'KS11' in t:
+                        ws.cell(row, 3).number_format = '"₩"#,##0.00'
+                    else:
+                        ws.cell(row, 3).number_format = '#,##0.00'
+                    ws.cell(row, 4).number_format = '0.00'
 
     async with bot:
         await bot.send_document(CHAT_ID, open(file_name, 'rb'), 
-                               caption=f"🌍 종합 리포트 ({now.strftime('%Y-%m-%d')})\n✅ 위안화 보강 및 전 종목 가운데 정렬 완료")
+                               caption=f"🌍 종합 리포트 ({now.strftime('%Y-%m-%d')})\n✅ 위안화 보강 및 전 항목 가운데 정렬 완료")
 
 if __name__ == "__main__":
     asyncio.run(send_report())
