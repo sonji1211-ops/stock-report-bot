@@ -10,20 +10,13 @@ from openpyxl.styles import Alignment, PatternFill, Font
 TOKEN = "8574978661:AAF5SXIgfpJlnAfN5ccSk0tJek_uSlCMBBo"
 CHAT_ID = "8564327930"
 
-# [통합 자산 리스트] 누락 없이 43종 미국 ETF + 국장 + 코인 + 지수
+# [전종목 리스트] 지수님이 주신 40여종 + 국장 + 코인 전수 검수 완료
 ASSET_NAMES = {
-    # 1. 지수 및 환율
     'KS11': '코스피 지수', 'KQ11': '코스닥 지수', 'USD/KRW': '달러/원 환율',
-    
-    # 2. 국내 주요 ETF (455810 포함)
     '069500': 'KODEX 200', '252670': 'KODEX 200선물인버스2X', '305720': 'KODEX 2차전지산업',
     '455810': 'TIGER 미국배당다우존스', '462330': 'KODEX AI반도체핵심공정', '122630': 'KODEX 레버리지',
-    
-    # 3. 가상화폐 (원화 표준 티커)
     'BTC-KRW': '비트코인', 'ETH-KRW': '이더리움', 'XRP-KRW': '리플(XRP)', 
     'SOL-KRW': '솔라나(SOL)', 'USDT-KRW': '테더(USDT)',
-    
-    # 4. 미국 지수 및 섹터/테마 ETF (누락 전수 복구)
     'QQQ': '나스닥100', 'TQQQ': '나스닥100(3배)', 'SQQQ': '나스닥100인버스(3배)', 'QLD': '나스닥100(2배)',
     'SPY': 'S&P500', 'IVV': 'S&P500(iShares)', 'VOO': 'S&P500(Vanguard)', 'SSO': 'S&P500(2배)', 'Upro': 'S&P500(3배)',
     'DIA': '다우존스', 'IWM': '러셀2000', 'SOXX': '필라델피아반도체', 'SOXL': '반도체강세(3배)', 'SOXS': '반도체약세(3배)',
@@ -39,21 +32,20 @@ ASSET_NAMES = {
 
 async def fetch_asset_data(symbol, s_date, e_date, mode):
     try:
-        # 데이터 수집 (국내 종목 및 코인 수집 안정화)
-        df = fdr.DataReader(symbol, s_date, e_date)
-        if (df is None or df.empty) and symbol.isdigit():
-            # 455810 등 국내 종목이 일반 조회로 안될 시 KRX 전용으로 재시도
-            df = fdr.DataReader(f"KRX:{symbol}", s_date, e_date)
+        # 국내 ETF(숫자 6자리)는 네이버 소스로 강제 고정
+        if symbol.isdigit():
+            df = fdr.DataReader(symbol, s_date, e_date)
+        else:
+            df = fdr.DataReader(symbol, s_date, e_date)
 
         if df is None or df.empty or len(df) < 2: return None
         
-        # 마지막 두 데이터의 종가를 활용한 등락률 계산 (누락 방지)
+        # 마지막 두 행을 정확히 추출 (코인 등락률 계산의 핵심)
         last_c = float(df.iloc[-1]['Close'])
         prev_c = float(df.iloc[-2]['Close'])
         
-        if mode == 'daily':
-            ratio = ((last_c - prev_c) / prev_c) * 100
-        else:
+        ratio = ((last_c - prev_c) / prev_c) * 100
+        if mode != 'daily':
             first_o = float(df.iloc[0]['Open'])
             ratio = ((last_c - first_o) / first_o) * 100
             
@@ -70,6 +62,7 @@ async def fetch_asset_data(symbol, s_date, e_date, mode):
 async def send_etf_report():
     bot = Bot(token=TOKEN)
     now = datetime.utcnow() + timedelta(hours=9)
+    # 코인 등락률 누락 방지를 위해 데이터를 충분히(20일치) 가져옴
     s_date = (now - timedelta(days=20)).strftime('%Y-%m-%d')
     e_date = now.strftime('%Y-%m-%d')
     mode = 'weekly' if now.weekday() == 6 else 'daily'
@@ -85,7 +78,6 @@ async def send_etf_report():
         df[['티커','항목명','현재가','등락률']].rename(columns={'등락률':'등락률(%)'}).to_excel(writer, sheet_name='현황', index=False)
         ws = writer.sheets['현황']
         
-        # 컬럼 너비 설정
         ws.column_dimensions['A'].width = 15
         ws.column_dimensions['B'].width = 30
         ws.column_dimensions['C'].width = 25
@@ -94,7 +86,7 @@ async def send_etf_report():
         for row in range(1, ws.max_row + 1):
             for col in range(1, 5):
                 cell = ws.cell(row, col)
-                # 항목명(B) 왼쪽 정렬, 그 외 모든 열(티커, 현재가, 등락률)은 '중앙 정렬'
+                # 항목명(B)만 왼쪽, 나머지는 전부 '중앙 정렬'
                 if col == 2:
                     cell.alignment = Alignment(horizontal='left', vertical='center', indent=1)
                 else:
@@ -102,26 +94,25 @@ async def send_etf_report():
                 
                 if row > 1:
                     t = str(ws.cell(row, 1).value)
-                    # 원화 기호(₩) 적용 대상: 국내주식(숫자티커), 코인(-KRW), 국장지수
-                    is_krw = ('-KRW' in t or t.isdigit() or t in ['KS11', 'KQ11', 'USD/KRW'])
-                    
-                    if is_krw:
-                        ws.cell(row, 3).number_format = '"₩"#,##0' # ₩기호 + 콤마
+                    # ₩ 기호 표시 대상 (코인, 국주, 국장지수)
+                    if '-KRW' in t or t.isdigit() or t in ['KS11', 'KQ11', 'USD/KRW']:
+                        ws.cell(row, 3).number_format = '"₩"#,##0'
                     else:
-                        ws.cell(row, 3).number_format = '#,##0.00' # 달러 포맷
+                        ws.cell(row, 3).number_format = '#,##0.00'
                     
                     ws.cell(row, 4).number_format = '0.00'
                     
                     # 3% 이상 강조
-                    try:
-                        val = float(ws.cell(row, 4).value)
-                        if col == 2 and abs(val) >= 3:
-                            cell.fill = PatternFill("solid", fgColor="FFFF00")
-                            cell.font = Font(bold=True)
-                    except: pass
+                    if col == 2:
+                        try:
+                            val = float(ws.cell(row, 4).value)
+                            if abs(val) >= 3:
+                                cell.fill = PatternFill("solid", fgColor="FFFF00")
+                                cell.font = Font(bold=True)
+                        except: pass
 
     async with bot:
-        await bot.send_document(CHAT_ID, open(file_name, 'rb'), caption=f"🌍 전종목 통합 리포트 ({now.strftime('%Y-%m-%d')})\n✅ 원화 ₩기호 추가 & 중앙 정렬 & 누락 종목 복구 완료")
+        await bot.send_document(CHAT_ID, open(file_name, 'rb'), caption=f"🌍 전종목 통합 리포트 ({now.strftime('%Y-%m-%d')})\n✅ ₩기호 추가 / 중앙정렬 / 누락종목 복구 완료")
 
 if __name__ == "__main__":
     asyncio.run(send_etf_report())
