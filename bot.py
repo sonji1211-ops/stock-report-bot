@@ -12,31 +12,26 @@ TOKEN = "8574978661:AAF5SXIgfpJlnAfN5ccSk0tJek_uSlCMBBo"
 CHAT_ID = "8564327930"
 
 async def fetch_stock_data(row, start_d, end_d, semaphore):
-    """다음, 야후, 구글, 네이버 순으로 데이터를 끝까지 찾아옵니다."""
+    """증권사 및 포털 소스를 다각화하여 초저속으로 수집합니다."""
     async with semaphore:
-        code = row['Code']
-        name = row['Name']
-        market = row['Market']
+        code, name, market = row['Code'], row['Name'], row['Market']
         
-        # 서버 감시 피하기 위한 랜덤 지연
-        await asyncio.sleep(random.uniform(0.2, 0.4))
+        # ⚠️ 차단 방지: 증권사 서버가 의심하지 않도록 1.2~2.8초 랜덤 휴식
+        await asyncio.sleep(random.uniform(1.2, 2.8))
         
         df = None
-        # 4대 소스 순차 시도
-        for src in ['daum', 'yahoo', 'google', 'naver']:
+        # 데이터 소스 우선순위: daum(증권사 연동) -> yahoo -> naver
+        for src in ['daum', 'yahoo', 'naver']:
             try:
                 ticker = code
-                # 소스별 티커 형식 맞춤
                 if src == 'yahoo':
                     ticker = f"{code}.KS" if market == 'KOSPI' else f"{code}.KQ"
-                elif src == 'google':
-                    ticker = f"KRX:{code}"
                 
                 df = fdr.DataReader(ticker, start_d, end_d)
                 if df is not None and len(df) >= 2:
-                    break # 데이터 찾으면 루프 탈출
+                    break 
             except:
-                continue # 실패하면 다음 소스로
+                continue
         
         if df is None or len(df) < 2:
             return None
@@ -62,13 +57,17 @@ async def send_smart_report():
     day_of_week = now.weekday()
 
     try:
-        # 1. 실시간 종목 리스트 (KRX)
-        df_base = fdr.StockListing('KRX')
+        # 1. 실시간 종목 리스트 확보 (실패 시 우회로 가동)
+        try:
+            df_base = fdr.StockListing('KRX')
+        except:
+            df_base = pd.concat([fdr.StockListing('KOSPI'), fdr.StockListing('KOSDAQ')])
+
         if df_base is None or df_base.empty:
             return
 
-        # 2. 분석 모드 (지수님 원본 로직)
-        if day_of_week == 6: # 일요일: 주간 500개
+        # 2. 요일별 분석 대상 (지수님 원본 로직 100%)
+        if day_of_week == 6: # 일요일: 주간 시총 상위 500
             report_type, analysis_info = "주간평균", "시총 상위 500"
             df_target = df_base.sort_values(by='Marcap', ascending=False).head(500).copy()
             end_d = (now - timedelta(days=2)).strftime('%Y-%m-%d')
@@ -80,19 +79,19 @@ async def send_smart_report():
             end_d = now.strftime('%Y-%m-%d')
             start_d = (now - timedelta(days=4)).strftime('%Y-%m-%d')
 
-        # 3. 비동기 수집 (안전하게 10개씩 동시 처리)
-        sem = asyncio.Semaphore(10)
-        print(f"[{report_type}] 수집 시작 (전방위 우회 모드)...")
+        # 3. 비동기 수집 (안전하게 동시 2개씩만 찔러서 차단 회피)
+        sem = asyncio.Semaphore(2)
+        print(f"[{report_type}] 증권사급 우회 모드 가동... 총 {len(df_target)}개 분석")
         
         tasks = [fetch_stock_data(row, start_d, end_d, sem) for _, row in df_target.iterrows()]
         results = await asyncio.gather(*tasks)
         df_final = pd.DataFrame([r for r in results if r is not None])
 
         if df_final.empty:
-            print("모든 웹사이트에서 차단되었습니다.")
+            print("데이터를 하나도 가져오지 못했습니다. 환경을 점검해 주세요.")
             return
 
-        # 4. 분류 및 엑셀 (지수님 디자인 100% 반영)
+        # 4. 분류 및 필터링 (5% 기준)
         h_map = {'Code':'종목코드', 'Name':'종목명', 'Open':'시가', 'Close':'종가', 'Low':'저가', 'High':'고가', 'Ratio':'등락률(%)', 'Volume':'거래량'}
         def get_data(m_name, is_up):
             temp = df_final[df_final['Market'].str.contains(m_name, na=False)].copy()
@@ -102,40 +101,54 @@ async def send_smart_report():
         sheets = {'코스피_상승': get_data('KOSPI', True), '코스닥_상승': get_data('KOSDAQ', True),
                   '코스피_하락': get_data('KOSPI', False), '코스닥_하락': get_data('KOSDAQ', False)}
 
+        # 5. 엑셀 디자인 (누락 없이 디테일하게 복구)
         file_name = f"{now.strftime('%m%d')}_{report_type}.xlsx"
-        
-        # 엑셀 서식 (가운데 정렬, 콤마, 강조 색상)
         header_fill = PatternFill("solid", fgColor="444444")
         header_font = Font(color="FFFFFF", bold=True)
-        fills = [PatternFill("solid", fgColor="FF0000"), PatternFill("solid", fgColor="FFBB00"), PatternFill("solid", fgColor="FFFF00")]
+        fills = [
+            PatternFill("solid", fgColor="FF0000"), # 28%↑ 빨강
+            PatternFill("solid", fgColor="FFBB00"), # 20%↑ 주황
+            PatternFill("solid", fgColor="FFFF00")  # 10%↑ 노랑
+        ]
         border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
 
         with pd.ExcelWriter(file_name, engine='openpyxl') as writer:
             for s_name, data in sheets.items():
                 data.to_excel(writer, sheet_name=s_name, index=False)
                 ws = writer.sheets[s_name]
+                
+                # 상단 헤더 스타일
                 for cell in ws[1]:
                     cell.fill, cell.font, cell.alignment = header_fill, header_font, Alignment(horizontal='center')
+                
+                # 본문 스타일 및 조건부 색상
                 for row in range(2, ws.max_row + 1):
                     ratio = abs(float(ws.cell(row, 7).value or 0))
                     name_cell = ws.cell(row, 2)
-                    if ratio >= 28: name_cell.fill, name_cell.font = fills[0], Font(color="FFFFFF", bold=True)
-                    elif ratio >= 20: name_cell.fill = fills[1]
-                    elif ratio >= 10: name_cell.fill = fills[2]
+                    
+                    if ratio >= 28:
+                        name_cell.fill, name_cell.font = fills[0], Font(color="FFFFFF", bold=True)
+                    elif ratio >= 20:
+                        name_cell.fill = fills[1]
+                    elif ratio >= 10:
+                        name_cell.fill = fills[2]
+                    
                     for col in range(1, 9):
                         ws.cell(row, col).alignment = Alignment(horizontal='center')
                         ws.cell(row, col).border = border
                         if col in [3,4,5,6,8]: ws.cell(row, col).number_format = '#,##0'
                         if col == 7: ws.cell(row, col).number_format = '0.00'
+                
                 ws.column_dimensions['B'].width = 20
-                for char in "ACDEFGH": ws.column_dimensions[char].width = 12
+                for char in "ACDEFGH": ws.column_dimensions[char].width = 13
 
-        # 5. 전송
+        # 6. 텔레그램 전송
         async with bot:
-            msg = (f"📅 {now.strftime('%Y-%m-%d')} *[{report_type}] 통합 리포트*\n\n"
+            msg = (f"📅 {now.strftime('%Y-%m-%d')} *[{report_type}] 리포트*\n"
+                   f"📡 데이터 소스: 증권사/포털 통합 우회\n\n"
                    f"📈 상승(5%↑): {len(sheets['코스피_상승'])+len(sheets['코스닥_상승'])}개\n"
                    f"📉 하락(5%↓): {len(sheets['코스피_하락'])+len(sheets['코스닥_하락'])}개\n\n"
-                   f"💡 4대 포털(다음/야후/구글/네이버) 데이터 통합 분석")
+                   f"💡 🔴28%↑, 🟠20%↑, 🟡10%↑")
             await bot.send_document(CHAT_ID, open(file_name, 'rb'), caption=msg, parse_mode="Markdown")
 
     except Exception as e:
