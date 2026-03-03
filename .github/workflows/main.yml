@@ -22,10 +22,10 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          # yfinance와 호환되는 최신 안정화 버전들로 구성
           pip install "numpy<2.0.0" 
           pip install pandas==2.0.3 
           pip install yfinance 
+          pip install yahooquery  # <--- 이 줄을 꼭 추가해주세요!
           pip install finance-datareader 
           pip install openpyxl 
           pip install python-telegram-bot 
