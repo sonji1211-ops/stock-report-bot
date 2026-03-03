@@ -21,10 +21,19 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install --upgrade pip
-          pip install "numpy<2.0.0" pandas==2.0.3 finance-datareader openpyxl python-telegram-bot requests lxml
+          python -m pip install --upgrade pip
+          # yfinance와 호환되는 최신 안정화 버전들로 구성
+          pip install "numpy<2.0.0" 
+          pip install pandas==2.0.3 
+          pip install yfinance 
+          pip install finance-datareader 
+          pip install openpyxl 
+          pip install python-telegram-bot 
+          pip install requests 
+          pip install lxml 
+          pip install beautifulsoup4
 
-      # [국장 1단계] 코스피 수집 및 전송
+      # [국장 1단계] 코스피 수집 및 전송 (야후 엔진)
       - name: Run KOSPI Report
         run: python bot_kospi.py
         env:
@@ -33,18 +42,19 @@ jobs:
       - name: Wait for Bypass
         run: sleep 30
 
-      # [국장 2단계] 코스닥 수집 및 전송
+      # [국장 2단계] 코스닥 수집 및 전송 (야후 엔진)
       - name: Run KOSDAQ Report
         run: python bot_kosdaq.py
         env:
           PYTHONIOENCODING: utf-8
 
-      # 미국장 및 ETF (기존 유지)
+      # 미국장 (기존 유지)
       - name: Run US Stock Bot
         run: python us_bot.py
         env:
           PYTHONIOENCODING: utf-8
 
+      # 미국 ETF (기존 유지)
       - name: Run US ETF Bot
         run: python us_etf_bot.py
         env:
