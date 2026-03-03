@@ -1,85 +1,97 @@
 import os
-import FinanceDataReader as fdr
 import pandas as pd
+import requests
+import re
+import io
 from datetime import datetime, timedelta
 import asyncio
 from telegram import Bot
 from openpyxl.styles import Alignment, PatternFill, Font, Border, Side
-import random
+import time
 
-# [설정] 텔레그램 정보
+# [설정] 텔레그램 정보 (지수님 정보 고정)
 TOKEN = "8574978661:AAF5SXIgfpJlnAfN5ccSk0tJek_uSlCMBBo"
 CHAT_ID = "8564327930"
 
-async def fetch_stock_safe(row, start_d, end_d, semaphore):
-    async with semaphore:
-        code, name, market = row['Code'], row['Name'], row['Market']
-        # ⚠️ 차단 방지를 위해 하나씩 천천히 (랜덤 지연 1.5~3초)
-        await asyncio.sleep(random.uniform(1.5, 3.0))
-        
-        for src in ['yahoo', 'google']:
+async def get_naver_realtime_data(limit=700):
+    """국장 차단을 뚫고 실시간 데이터를 수집하는 핵심 함수"""
+    list_url = "https://finance.naver.com/sise/sise_market_sum.naver"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Referer': 'https://finance.naver.com/'
+    }
+    all_stocks = []
+    
+    # 코스피(0), 코스닥(1) 순회
+    for m_code in [0, 1]:
+        market_label = "KOSPI" if m_code == 0 else "KOSDAQ"
+        # 상위 종목 위주로 페이지당 50개씩 수집
+        for page in range(1, (limit // 50) + 2):
             try:
-                ticker = f"{code}.KS" if market == 'KOSPI' else f"{code}.KQ"
-                if src == 'google': ticker = f"KRX:{code}"
+                resp = requests.get(list_url, params={'sosok': m_code, 'page': page}, headers=headers, timeout=10)
+                item_codes = re.findall(r'code=(\d{6})', resp.text)
+                item_codes = list(dict.fromkeys(item_codes))
                 
-                df = fdr.DataReader(ticker, start_d, end_d)
-                if df is not None and len(df) >= 2:
-                    last_c = float(df.iloc[-1]['Close'])
-                    prev_c = float(df.iloc[-2]['Close'])
-                    ratio = round(((last_c - prev_c) / prev_c) * 100, 2)
-                    return {
-                        'Code': code, 'Name': name, 
-                        'Open': df.iloc[-1]['Open'], 'Close': last_c,
-                        'Low': df['Low'].min(), 'High': df['High'].max(), 
-                        'Ratio': ratio, 'Volume': df.iloc[-1]['Volume'],
-                        'Market': market
-                    }
+                dfs = pd.read_html(io.StringIO(resp.text))
+                df_list = dfs[1].dropna(subset=['종목명']).copy()
+                
+                for i, (idx, row) in enumerate(df_list.iterrows()):
+                    if i >= len(item_codes): break
+                    code = item_codes[i]
+                    try:
+                        # 네이버 실시간 상세 API (등락률 부호 및 실제 시/고/저/종가)
+                        api_url = f"https://polling.finance.naver.com/api/realtime?query=SERVICE_ITEM:{code}"
+                        api_resp = requests.get(api_url, headers=headers, timeout=5).json()
+                        item = api_resp['result']['areas'][0]['datas'][0]
+                        
+                        all_stocks.append({
+                            'Code': code, 'Name': row['종목명'], 
+                            'Open': int(item['sv']), 'Close': int(item['nv']),
+                            'Low': int(item['lv']), 'High': int(item['hv']), 
+                            'Ratio': float(item['cr']), 'Volume': int(item['aq']),
+                            'Market': market_label
+                        })
+                    except: continue
             except: continue
-        return None
+            time.sleep(0.1) # 깃허브 서버 차단 방지 미세 지연
+            
+    return pd.DataFrame(all_stocks)
 
 async def send_smart_report():
+    """메인 실행 함수: 데이터 분류 -> 엑셀 생성 -> 텔레그램 전송"""
     bot = Bot(token=TOKEN)
+    # 한국 시간(KST) 설정
     now = datetime.utcnow() + timedelta(hours=9)
     day_of_week = now.weekday()
 
     try:
-        # 1. 종목 리스트 확보
-        df_base = fdr.StockListing('KRX')
+        # 요일별 수집 범위 설정 (일요일: 500개 / 평일: 700개)
+        limit_count = 500 if day_of_week == 6 else 700
+        report_type = "주간평균" if day_of_week == 6 else "일일"
+        if day_of_week == 5: report_type = "일일(금요마감)"
         
-        # 2. 요일별 범위 설정 (GitHub 생존을 위해 일일 700개로 최적화)
-        if day_of_week == 6: # 일요일: 주간 시총 상위 500
-            report_type, analysis_info = "주간평균", "시총 상위 500"
-            df_target = df_base.sort_values('Marcap', ascending=False).head(500).copy()
-            start_d = (now - timedelta(days=6)).strftime('%Y-%m-%d')
-        else: # 평일: 일일 시총 상위 700 (차단 방지 마지노선)
-            report_type, analysis_info = "일일", "상위 700 종목"
-            if day_of_week == 5: report_type = "일일(금요마감)"
-            df_target = df_base.sort_values('Marcap', ascending=False).head(700).copy()
-            start_d = (now - timedelta(days=4)).strftime('%Y-%m-%d')
-        
-        end_d = now.strftime('%Y-%m-%d')
+        print(f"📡 {report_type} 리포트 분석을 시작합니다...")
+        df_final = await get_naver_realtime_data(limit=limit_count)
 
-        # 3. 비동기 수집 (안전하게 1개씩 순차 처리)
-        sem = asyncio.Semaphore(1) 
-        tasks = [fetch_stock_safe(row, start_d, end_d, sem) for _, row in df_target.iterrows()]
-        results = await asyncio.gather(*tasks)
-        df_final = pd.DataFrame([r for r in results if r is not None])
+        if df_final.empty: 
+            print("❌ 수집된 데이터가 없습니다.")
+            return
 
-        if df_final.empty: return
-
-        # 4. 분류 및 필터링 (5% 기준)
+        # 데이터 필터링 (상승/하락 5% 기준)
         h_map = {'Code':'종목코드', 'Name':'종목명', 'Open':'시가', 'Close':'종가', 'Low':'저가', 'High':'고가', 'Ratio':'등락률(%)', 'Volume':'거래량'}
-        def get_data(m_name, is_up):
+        def get_filtered_data(m_name, is_up):
             temp = df_final[df_final['Market'].str.contains(m_name, na=False)].copy()
             cond = (temp['Ratio'] >= 5) if is_up else (temp['Ratio'] <= -5)
             return temp[cond].sort_values('Ratio', ascending=not is_up).rename(columns=h_map).drop(columns=['Market'])
 
-        sheets = {'코스피_상승': get_data('KOSPI', True), '코스닥_상승': get_data('KOSDAQ', True),
-                  '코스피_하락': get_data('KOSPI', False), '코스닥_하락': get_data('KOSDAQ', False)}
+        sheets = {
+            '코스피_상승': get_filtered_data('KOSPI', True), '코스닥_상승': get_filtered_data('KOSDAQ', True),
+            '코스피_하락': get_filtered_data('KOSPI', False), '코스닥_하락': get_filtered_data('KOSDAQ', False)
+        }
 
         file_name = f"{now.strftime('%m%d')}_{report_type}.xlsx"
         
-        # 5. 엑셀 디자인 (누락 없이 완벽 복구)
+        # --- 엑셀 디자인 설정 (지수님 요청 사항) ---
         header_fill = PatternFill("solid", fgColor="444444")
         header_font = Font(color="FFFFFF", bold=True)
         fills = [
@@ -94,16 +106,16 @@ async def send_smart_report():
                 data.to_excel(writer, sheet_name=s_name, index=False)
                 ws = writer.sheets[s_name]
                 
-                # 헤더 스타일
+                # 헤더 스타일링
                 for cell in ws[1]:
                     cell.fill, cell.font, cell.alignment = header_fill, header_font, Alignment(horizontal='center')
                 
-                # 본문 스타일 (정렬, 테두리, 색상, 포맷)
+                # 본문 스타일링 및 색상 강조
                 for row in range(2, ws.max_row + 1):
-                    ratio = abs(float(ws.cell(row, 7).value or 0))
+                    ratio_val = ws.cell(row, 7).value
+                    ratio = abs(float(ratio_val if ratio_val is not None else 0))
                     name_cell = ws.cell(row, 2)
                     
-                    # 등락률 강조 색상
                     if ratio >= 28:
                         name_cell.fill, name_cell.font = fills[0], Font(color="FFFFFF", bold=True)
                     elif ratio >= 20:
@@ -111,33 +123,30 @@ async def send_smart_report():
                     elif ratio >= 10:
                         name_cell.fill = fills[2]
                     
-                    # 모든 셀 정렬 및 테두리 적용
                     for col in range(1, 9):
                         ws.cell(row, col).alignment = Alignment(horizontal='center')
                         ws.cell(row, col).border = border
-                        # 천 단위 콤마
-                        if col in [3, 4, 5, 6, 8]:
-                            ws.cell(row, col).number_format = '#,##0'
-                        # 소수점 2자리
-                        if col == 7:
-                            ws.cell(row, col).number_format = '0.00'
+                        if col in [3, 4, 5, 6, 8]: ws.cell(row, col).number_format = '#,##0'
+                        if col == 7: ws.cell(row, col).number_format = '0.00'
                 
-                # 열 너비 조절
                 ws.column_dimensions['B'].width = 20
-                for char in "ACDEFGH":
-                    ws.column_dimensions[char].width = 13
+                for char in "ACDEFGH": ws.column_dimensions[char].width = 13
 
-        # 6. 전송
-        async with bot:
-            msg = (f"📅 {now.strftime('%m-%d')} *[{report_type}] 리포트*\n"
-                   f"📡 분석: {len(df_final)}개 종목 성공\n\n"
-                   f"📈 상승(5%↑): {len(sheets['코스피_상승'])+len(sheets['코스닥_상승'])}개\n"
-                   f"📉 하락(5%↓): {len(sheets['코스피_하락'])+len(sheets['코스닥_하락'])}개\n\n"
-                   f"💡 🔴28%↑, 🟠20%↑, 🟡10%↑")
-            await bot.send_document(CHAT_ID, open(file_name, 'rb'), caption=msg, parse_mode="Markdown")
+        # --- 텔레그램 전송 ---
+        msg = (f"📅 {now.strftime('%m-%d')} *[{report_type}] 리포트*\n"
+               f"📡 분석: {len(df_final)}개 종목 수집 완료\n\n"
+               f"📈 상승(5%↑): {len(sheets['코스피_상승'])+len(sheets['코스닥_상승'])}개\n"
+               f"📉 하락(5%↓): {len(sheets['코스피_하락'])+len(sheets['코스닥_하락'])}개\n\n"
+               f"💡 🔴28%↑, 🟠20%↑, 🟡10%↑")
+        
+        with open(file_name, 'rb') as f:
+            await bot.send_document(CHAT_ID, document=f, caption=msg, parse_mode="Markdown")
+        
+        os.remove(file_name) # 서버 임시 파일 삭제
+        print(f"✅ {file_name} 전송 완료!")
 
     except Exception as e:
-        print(f"최종 오류: {e}")
+        print(f"❌ 오류 발생: {e}")
 
 if __name__ == "__main__":
     asyncio.run(send_smart_report())
