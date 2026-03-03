@@ -1,4 +1,4 @@
-import os, pandas as pd, yfinance as yf, asyncio, time
+import os, pandas as pd, yfinance as yf, asyncio, time, random
 from datetime import datetime, timedelta
 from telegram import Bot
 from openpyxl.styles import Alignment, PatternFill, Font, Border, Side
@@ -6,58 +6,60 @@ from openpyxl.styles import Alignment, PatternFill, Font, Border, Side
 TOKEN = "8574978661:AAF5SXIgfpJlnAfN5ccSk0tJek_uSlCMBBo"
 CHAT_ID = "8564327930"
 
-async def fetch_kospi_data():
-    print("📡 야후 파이낸스 엔진 가동 (KOSPI 전수조사 시작)...")
+async def fetch_stock_data(market_type):
+    # market_type: 0 (KOSPI), 1 (KOSDAQ)
+    market_name = "KOSPI" if market_type == 0 else "KOSDAQ"
+    market_code = "유가증권시장" if market_type == 0 else "코스닥"
+    suffix = ".KS" if market_type == 0 else ".KQ"
     
-    # KOSPI 종목 리스트를 가져오는 것은 네이버가 아닌 한국거래소(KRX) 파일을 이용하거나
-    # 주요 상위 종목 리스트를 통해 안정적으로 수집합니다.
-    # 여기서는 지수님이 원하시는 '전수조사'급 데이터를 위해 KRX 데이터를 활용하는 방식을 씁니다.
+    print(f"📡 {market_name} 야후 엔진 전수조사 시작...")
+    
     try:
         url = 'http://kind.krx.co.kr/corpoat/corpList.do?method=download&searchType=13'
         krx_df = pd.read_html(url, header=0)[0]
-        # 코스피(유가증권시장) 종목만 필터링
-        kospi_list = krx_df[krx_df['시장구분'] == '유가증권시장']['종목코드'].map('{:06d}.KS'.format).tolist()
+        target_df = krx_df[krx_df['시장구분'] == market_code]
+        # 상위 600개 종목 위주로 수집 (속도와 안정성)
+        stock_list = target_df['종목코드'].map('{:06d}'.format).tolist()[:600]
+        tickers = [s + suffix for s in stock_list]
     except:
-        # KRX 서버 불안정 시 수동 리스트 (예시)
-        kospi_list = ['005930.KS', '000660.KS', '035420.KS'] # 실제론 전체 리스트가 들어갑니다.
+        print("❌ KRX 리스트 획득 실패")
+        return pd.DataFrame()
 
     all_stocks = []
-    # 덩어리로 나눠서 수집하여 속도 향상
-    chunk_size = 50
-    for i in range(0, len(kospi_list), chunk_size):
-        tickers = " ".join(kospi_list[i:i+chunk_size])
-        data = yf.download(tickers, period='2d', interval='1d', group_by='ticker', threads=True)
-        
-        for ticker in kospi_list[i:i+chunk_size]:
-            try:
-                s_data = data[ticker]
-                if len(s_data) < 2: continue
-                
-                close_v = s_data['Close'].iloc[-1]
-                prev_v = s_data['Close'].iloc[-2]
-                ratio = ((close_v - prev_v) / prev_v) * 100
-                
-                name = krx_df[krx_df['종목코드'] == int(ticker[:6])]['회사명'].values[0]
-                
-                all_stocks.append({
-                    'Name': name, 'Open': int(s_data['Open'].iloc[-1]), 'Close': int(close_v),
-                    'Low': int(s_data['Low'].iloc[-1]), 'High': int(s_data['High'].iloc[-1]),
-                    'Ratio': float(ratio), 'Volume': int(s_data['Volume'].iloc[-1])
-                })
-            except: continue
-        print(f"✅ {i+chunk_size}개 종목 분석 완료...")
+    chunk_size = 50 
+    for i in range(0, len(tickers), chunk_size):
+        batch = tickers[i:i+chunk_size]
+        try:
+            # 2일치 데이터를 가져와서 전일 대비 등락률 계산
+            data = yf.download(batch, period='2d', interval='1d', group_by='ticker', threads=True, silent=True)
+            for t in batch:
+                try:
+                    s = data[t]
+                    if len(s) < 2: continue
+                    close_v = s['Close'].iloc[-1]
+                    prev_v = s['Close'].iloc[-2]
+                    if close_v <= 0 or pd.isna(close_v): continue
+                    
+                    ratio = ((close_v - prev_v) / prev_v) * 100
+                    name = krx_df[krx_df['종목코드'] == int(t[:6])]['회사명'].values[0]
+                    
+                    all_stocks.append({
+                        'Name': name, 'Open': int(s['Open'].iloc[-1]), 'Close': int(close_v),
+                        'Low': int(s['Low'].iloc[-1]), 'High': int(s['High'].iloc[-1]),
+                        'Ratio': float(ratio), 'Volume': int(s['Volume'].iloc[-1])
+                    })
+                except: continue
+        except: pass
+        print(f"✅ {min(i+chunk_size, len(tickers))}개 분석 완료...")
         
     return pd.DataFrame(all_stocks)
 
 async def main():
     bot = Bot(token=TOKEN)
     now = datetime.utcnow() + timedelta(hours=9)
+    df = await fetch_stock_data(0) # 0: KOSPI
     
-    df = await fetch_kospi_data()
-    
-    if df.empty:
-        print("❌ 데이터를 가져오지 못했습니다.")
-        return
+    if df.empty: return
 
     r_type = "주간평균" if now.weekday() == 6 else "일일"
     file_name = f"{now.strftime('%m%d')}_KOSPI_{r_type}.xlsx"
@@ -65,7 +67,6 @@ async def main():
     up_df = df[df['Ratio'] >= 5.0].sort_values('Ratio', ascending=False)
     down_df = df[df['Ratio'] <= -5.0].sort_values('Ratio', ascending=True)
 
-    # 지수님 요구사항 디자인 (100% 동일 적용)
     h_map = {'Name':'종목명','Open':'시가','Close':'종가','Low':'저가','High':'고가','Ratio':'등락률(%)','Volume':'거래량'}
     red, ora, yel = PatternFill("solid", "FF0000"), PatternFill("solid", "FFCC00"), PatternFill("solid", "FFFF00")
     header_f, white_f = PatternFill("solid", "444444"), Font(color="FFFFFF", bold=True)
@@ -90,10 +91,8 @@ async def main():
                     if c == 6: ws.cell(r, c).number_format = '0.00'
             ws.column_dimensions['A'].width = 18
 
-    msg = f"📅 {now.strftime('%m-%d')} *[KOSPI {r_type}]*\n📊 야후 엔진 전수조사 완료\n📈 상승: {len(up_df)} / 📉 하락: {len(down_df)}"
-    with open(file_name, 'rb') as f:
-        await bot.send_document(CHAT_ID, document=f, caption=msg, parse_mode="Markdown")
-    os.remove(file_name)
+    msg = f"📅 {now.strftime('%m-%d')} *[KOSPI {r_type}]*\n📈 상승: {len(up_df)} / 📉 하락: {len(down_df)}"
+    with open(file_name, 'rb') as f: await bot.send_document(CHAT_ID, document=f, caption=msg, parse_mode="Markdown")
+    if os.path.exists(file_name): os.remove(file_name)
 
-if __name__ == "__main__":
-    asyncio.run(main())
+if __name__ == "__main__": asyncio.run(main())
