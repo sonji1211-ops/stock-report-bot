@@ -31,7 +31,7 @@ jobs:
           PYTHONIOENCODING: utf-8
 
       - name: Wait for Bypass
-        run: sleep 60
+        run: sleep 30
 
       # [국장 2단계] 코스닥 수집 및 전송
       - name: Run KOSDAQ Report
