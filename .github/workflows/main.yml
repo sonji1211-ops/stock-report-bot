@@ -22,15 +22,17 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
+          # 데이터 수집 핵심 라이브러리 설치
           pip install "numpy<2.0.0" 
           pip install pandas==2.0.3 
+          pip install yfinance          # 추가: 현재 가장 안정적인 수집 엔진
           pip install yahooquery
           pip install finance-datareader 
           pip install openpyxl 
           pip install python-telegram-bot 
           pip install requests lxml beautifulsoup4
 
-      # [국장 통합본] 코스피 & 코스닥 수집 및 전송
+      # [국장 통합본] 지수님 스타일의 코스피 & 코스닥 수집 및 전송
       - name: Run Korea Stock Bot
         run: python bot.py
         env:
