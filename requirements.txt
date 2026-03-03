@@ -1,5 +1,6 @@
-requirements.txt
 pandas
 FinanceDataReader
 openpyxl
 python-telegram-bot
+yahooquery
+yfinance
