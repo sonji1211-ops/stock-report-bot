@@ -1,60 +1,76 @@
-# KOSPI 코드와 동일하며 sosok=1로 세팅된 버전입니다.
-import os, pandas as pd, requests, re, io, time, random, asyncio
+import os, pandas as pd, yfinance as yf, asyncio, time, random
 from datetime import datetime, timedelta
 from telegram import Bot
-from bs4 import BeautifulSoup
 from openpyxl.styles import Alignment, PatternFill, Font, Border, Side
 
 TOKEN = "8574978661:AAF5SXIgfpJlnAfN5ccSk0tJek_uSlCMBBo"
 CHAT_ID = "8564327930"
 
-def fetch_naver_stock(sosok, page):
-    url = f"https://finance.naver.com/sise/sise_market_sum.naver?sosok={sosok}&field=quant&field=open&field=high&field=low&field=frate&page={page}"
-    headers = {'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/121.0.0.0 Safari/537.36', 'Referer': 'https://finance.naver.com/'}
+async def fetch_stock_data(market_type):
+    market_name = "KOSDAQ"
+    market_code = "코스닥"
+    suffix = ".KQ"
+    
+    print(f"📡 {market_name} 야후 엔진 전수조사 시작...")
+    
     try:
-        resp = requests.get(url, headers=headers, timeout=10)
-        if resp.status_code != 200: return []
-        soup = BeautifulSoup(resp.text, 'lxml')
-        table = soup.find('table', {'class': 'type_2'})
-        if not table: return []
-        rows = []
-        for tr in table.find_all('tr'):
-            tds = tr.find_all('td')
-            if len(tds) < 10: continue
-            name = tds[1].get_text(strip=True)
-            if not name: continue
-            def clean(i): return tds[i].get_text(strip=True).replace(',', '').replace('%', '').replace('+', '')
-            try:
-                rows.append({'Name': name, 'Close': int(clean(2)), 'Ratio': float(clean(4)), 'Volume': int(clean(5)),
-                             'Open': int(clean(7)), 'High': int(clean(8)), 'Low': int(clean(9))})
-            except: continue
-        return rows
-    except: return []
+        url = 'http://kind.krx.co.kr/corpoat/corpList.do?method=download&searchType=13'
+        krx_df = pd.read_html(url, header=0)[0]
+        target_df = krx_df[krx_df['시장구분'] == market_code]
+        stock_list = target_df['종목코드'].map('{:06d}'.format).tolist()[:800] # 코스닥은 종목이 더 많음
+        tickers = [s + suffix for s in stock_list]
+    except:
+        return pd.DataFrame()
 
-async def run_report():
+    all_stocks = []
+    chunk_size = 50 
+    for i in range(0, len(tickers), chunk_size):
+        batch = tickers[i:i+chunk_size]
+        try:
+            data = yf.download(batch, period='2d', interval='1d', group_by='ticker', threads=True, silent=True)
+            for t in batch:
+                try:
+                    s = data[t]
+                    if len(s) < 2: continue
+                    close_v = s['Close'].iloc[-1]
+                    prev_v = s['Close'].iloc[-2]
+                    if close_v <= 0: continue
+                    
+                    ratio = ((close_v - prev_v) / prev_v) * 100
+                    name = krx_df[krx_df['종목코드'] == int(t[:6])]['회사명'].values[0]
+                    
+                    all_stocks.append({
+                        'Name': name, 'Open': int(s['Open'].iloc[-1]), 'Close': int(close_v),
+                        'Low': int(s['Low'].iloc[-1]), 'High': int(s['High'].iloc[-1]),
+                        'Ratio': float(ratio), 'Volume': int(s['Volume'].iloc[-1])
+                    })
+                except: continue
+        except: pass
+        print(f"✅ {min(i+chunk_size, len(tickers))}개 분석 완료...")
+        
+    return pd.DataFrame(all_stocks)
+
+async def main():
     bot = Bot(token=TOKEN)
     now = datetime.utcnow() + timedelta(hours=9)
-    all_data = []
-    print("📡 KOSDAQ 전수조사 시작 (최대 30p)...")
-    for p in range(1, 31):
-        data = fetch_naver_stock(1, p) # sosok=1 (KOSDAQ)
-        if not data: break
-        all_data.extend(data)
-        if p % 10 == 0: print(f"✅ {p}p 완료 ({len(all_data)}개)")
-        time.sleep(random.uniform(0.3, 0.6))
-    df = pd.DataFrame(all_data)
+    df = await fetch_stock_data(1) # 1: KOSDAQ
+    
     if df.empty: return
+
     r_type = "주간평균" if now.weekday() == 6 else "일일"
     file_name = f"{now.strftime('%m%d')}_KOSDAQ_{r_type}.xlsx"
+    
     up_df = df[df['Ratio'] >= 5.0].sort_values('Ratio', ascending=False)
     down_df = df[df['Ratio'] <= -5.0].sort_values('Ratio', ascending=True)
+
     h_map = {'Name':'종목명','Open':'시가','Close':'종가','Low':'저가','High':'고가','Ratio':'등락률(%)','Volume':'거래량'}
     red, ora, yel = PatternFill("solid", "FF0000"), PatternFill("solid", "FFCC00"), PatternFill("solid", "FFFF00")
     header_f, white_f = PatternFill("solid", "444444"), Font(color="FFFFFF", bold=True)
     border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
+
     with pd.ExcelWriter(file_name, engine='openpyxl') as writer:
         for s_name, d in {'코스닥_상승': up_df, '코스닥_하락': down_df}.items():
-            tmp = d.rename(columns=h_map) if not d.empty else pd.DataFrame([['조건 만족 종목 없음']+['']*6], columns=list(h_map.values()))
+            tmp = d.rename(columns=h_map) if not d.empty else pd.DataFrame([['종목 없음']+['']*6], columns=list(h_map.values()))
             tmp.to_excel(writer, sheet_name=s_name, index=False)
             ws = writer.sheets[s_name]
             for cell in ws[1]: cell.fill, cell.font, cell.alignment = header_f, white_f, Alignment(horizontal='center')
@@ -70,8 +86,9 @@ async def run_report():
                     if c in [2,3,4,5,7]: ws.cell(r, c).number_format = '#,##0'
                     if c == 6: ws.cell(r, c).number_format = '0.00'
             ws.column_dimensions['A'].width = 18
-    msg = f"📅 {now.strftime('%m-%d')} *[KOSDAQ {r_type}]*\n📊 수집: {len(df)}개\n📈 상승: {len(up_df)} / 📉 하락: {len(down_df)}"
+
+    msg = f"📅 {now.strftime('%m-%d')} *[KOSDAQ {r_type}]*\n📈 상승: {len(up_df)} / 📉 하락: {len(down_df)}"
     with open(file_name, 'rb') as f: await bot.send_document(CHAT_ID, document=f, caption=msg, parse_mode="Markdown")
     if os.path.exists(file_name): os.remove(file_name)
 
-if __name__ == "__main__": asyncio.run(run_report())
+if __name__ == "__main__": asyncio.run(main())
