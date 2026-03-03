@@ -1,111 +1,88 @@
-import os, pandas as pd, requests, re, io, time, random, asyncio
+import os, pandas as pd, requests, time, random, asyncio
 from datetime import datetime, timedelta
 from telegram import Bot
-from bs4 import BeautifulSoup
 from openpyxl.styles import Alignment, PatternFill, Font, Border, Side
 
 TOKEN = "8574978661:AAF5SXIgfpJlnAfN5ccSk0tJek_uSlCMBBo"
 CHAT_ID = "8564327930"
 
-def fetch_naver_stock(sosok, page):
-    # 세션 사용으로 쿠키 유지 (차단 방지 핵심)
-    session = requests.Session()
-    url = f"https://finance.naver.com/sise/sise_market_sum.naver?sosok={sosok}&field=quant&field=open&field=high&field=low&field=frate&page={page}"
+async def fetch_api_data(sosok):
+    all_stocks = []
+    # 네이버 내부 API: sosok 0=코스피, 1=코스닥
+    # 차단을 피하기 위해 브라우저가 호출하는 실제 API 주소 사용
+    base_url = "https://finance.naver.com/sise/sise_market_sum.naver"
     
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-        'Referer': 'https://finance.naver.com/sise/',
-        'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7'
-    }
+    print(f"📡 {'KOSPI' if sosok==0 else 'KOSDAQ'} API 전수조사 시작...")
     
-    try:
-        resp = session.get(url, headers=headers, timeout=15)
-        # 한글 깨짐 방지
-        resp.encoding = 'euc-kr' 
+    for page in range(1, 31):
+        params = {
+            'sosok': sosok,
+            'page': page,
+            'field': ['quant', 'open', 'high', 'low', 'frate']
+        }
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Referer': 'https://finance.naver.com/sise/sise_market_sum.naver',
+            'Accept': '*/*'
+        }
         
-        if resp.status_code != 200:
-            print(f"❌ 접속 실패 (상태 코드: {resp.status_code})")
-            return []
+        try:
+            # requests.get으로 직접 표 읽기 시도
+            resp = requests.get(base_url, params=params, headers=headers, timeout=15)
+            resp.encoding = 'euc-kr'
             
-        soup = BeautifulSoup(resp.text, 'html.parser')
-        # 네이버 금융 특유의 테이블 구조 타겟팅
-        table = soup.select_one('table.type_2')
-        
-        if not table:
-            print(f"⚠️ {page}p: 테이블을 찾을 수 없습니다. (차단 가능성 높음)")
-            return []
-        
-        rows = []
-        # 데이터가 있는 tr만 추출 (선이 있는 줄 제외)
-        tr_list = table.select('tr')
-        
-        for tr in tr_list:
-            tds = tr.select('td')
-            if len(tds) < 10: continue
+            # read_html 대신 데이터 직접 추출로 안정성 확보
+            dfs = pd.read_html(resp.text)
+            df = next((d for d in dfs if '종목명' in d.columns), None)
             
-            # 종목명 추출 (a 태그 우선)
-            name_tag = tds[1].select_one('a')
-            if not name_tag: continue
-            name = name_tag.get_text(strip=True)
-            
-            def clean(i):
-                val = tds[i].get_text(strip=True).replace(',', '').replace('%', '').replace('+', '').replace('-', '0')
-                return val if val else '0'
+            if df is None or df.dropna(subset=['종목명']).empty:
+                break
                 
-            try:
-                rows.append({
-                    'Name': name,
-                    'Close': int(clean(2)),
-                    'Ratio': float(tds[4].get_text(strip=True).replace('%','').replace('+','')),
-                    'Volume': int(clean(5)),
-                    'Open': int(clean(7)),
-                    'High': int(clean(8)),
-                    'Low': int(clean(9))
-                })
-            except Exception as e:
-                continue
+            df = df.dropna(subset=['종목명']).copy()
+            df.columns = [str(c).strip() for c in df.columns]
+            
+            for _, row in df.iterrows():
+                try:
+                    def clean(val): return float(str(val).replace(',', '').replace('%', '').replace('+', '').replace('-', '0'))
+                    all_stocks.append({
+                        'Name': str(row['종목명']),
+                        'Close': int(clean(row['현재가'])),
+                        'Ratio': float(clean(row['등락률'])),
+                        'Volume': int(clean(row['거래량'])),
+                        'Open': int(clean(row['시가'])),
+                        'High': int(clean(row['고가'])),
+                        'Low': int(clean(row['저가']))
+                    })
+                except: continue
                 
-        return rows
-    except Exception as e:
-        print(f"⚠️ {page}p 에러: {e}")
-        return []
+            print(f"✅ {page}p 완료 (누적 {len(all_stocks)}개)")
+            time.sleep(random.uniform(0.5, 1.0))
+            
+        except Exception as e:
+            print(f"⚠️ {page}p 오류: {e}")
+            break
+            
+    return pd.DataFrame(all_stocks)
 
-async def run_report():
+async def main():
     bot = Bot(token=TOKEN)
     now = datetime.utcnow() + timedelta(hours=9)
-    all_data = []
     
-    print(f"📡 KOSPI 전수조사 시작 ({now.strftime('%Y-%m-%d %H:%M')})")
+    # 코스피(0) 수집
+    df = await fetch_api_data(0)
     
-    for p in range(1, 31):
-        data = fetch_naver_stock(0, p)
-        if not data:
-            # 1페이지에서 실패하면 한 번 더 시도 (랜덤 대기 후)
-            if p == 1:
-                print("🔄 1페이지 재시도 중...")
-                time.sleep(3)
-                data = fetch_naver_stock(0, p)
-            if not data: break
-            
-        all_data.extend(data)
-        print(f"✅ {p}/30p 수집 완료 (현재 {len(all_data)}개)")
-        # 네이버 감시를 피하기 위한 랜덤 지연
-        time.sleep(random.uniform(1.0, 2.5))
-
-    if not all_data:
-        print("❌ 수집된 데이터가 없습니다. 프로그램을 종료합니다.")
+    if df.empty:
+        print("❌ 데이터를 가져오는데 실패했습니다.")
         return
 
-    df = pd.DataFrame(all_data)
     r_type = "주간평균" if now.weekday() == 6 else "일일"
     file_name = f"{now.strftime('%m%d')}_KOSPI_{r_type}.xlsx"
     
-    # 지수님 요구사항 필터링 (5% 이상/이하)
+    # 필터링 및 정렬
     up_df = df[df['Ratio'] >= 5.0].sort_values('Ratio', ascending=False)
     down_df = df[df['Ratio'] <= -5.0].sort_values('Ratio', ascending=True)
 
-    # 엑셀 디자인 및 포맷 (기존 요구사항 100% 유지)
+    # 지수님 요구사항 디자인 세팅
     h_map = {'Name':'종목명','Open':'시가','Close':'종가','Low':'저가','High':'고가','Ratio':'등락률(%)','Volume':'거래량'}
     red, ora, yel = PatternFill("solid", "FF0000"), PatternFill("solid", "FFCC00"), PatternFill("solid", "FFFF00")
     header_f, white_f = PatternFill("solid", "444444"), Font(color="FFFFFF", bold=True)
@@ -120,7 +97,7 @@ async def run_report():
             for r in range(2, ws.max_row + 1):
                 try:
                     val = ws.cell(r, 6).value
-                    v = abs(float(val)) if val and str(val).replace('.','').replace('-','').isdigit() else 0
+                    v = abs(float(val)) if val else 0
                     if v >= 28: ws.cell(r, 1).fill, ws.cell(r, 1).font = red, white_f
                     elif v >= 20: ws.cell(r, 1).fill = ora
                     elif v >= 10: ws.cell(r, 1).fill = yel
@@ -131,15 +108,10 @@ async def run_report():
                     if c == 6: ws.cell(r, c).number_format = '0.00'
             ws.column_dimensions['A'].width = 18
 
-    msg = f"📅 {now.strftime('%m-%d')} *[KOSPI {r_type}]*\n📊 전체 수집: {len(df)}개\n📈 상승(5%↑): {len(up_df)} / 📉 하락(5%↓): {len(down_df)}"
-    try:
-        with open(file_name, 'rb') as f:
-            await bot.send_document(CHAT_ID, document=f, caption=msg, parse_mode="Markdown")
-        print("🚀 텔레그램 리포트 발송 성공!")
-    except Exception as e:
-        print(f"❌ 발송 에러: {e}")
-    finally:
-        if os.path.exists(file_name): os.remove(file_name)
+    msg = f"📅 {now.strftime('%m-%d')} *[KOSPI {r_type}]*\n📊 수집: {len(df)}개\n📈 상승: {len(up_df)} / 📉 하락: {len(down_df)}"
+    with open(file_name, 'rb') as f:
+        await bot.send_document(CHAT_ID, document=f, caption=msg, parse_mode="Markdown")
+    os.remove(file_name)
 
 if __name__ == "__main__":
-    asyncio.run(run_report())
+    asyncio.run(main())
