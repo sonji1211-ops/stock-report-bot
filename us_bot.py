@@ -1,146 +1,122 @@
-import os
-import FinanceDataReader as fdr
-import pandas as pd
-from datetime import datetime, timedelta
-import asyncio
+import os, pandas as pd, asyncio, time, datetime
+import yfinance as yf
 from telegram import Bot
-from openpyxl.styles import Alignment, PatternFill, Font
+from openpyxl.styles import Alignment, PatternFill, Font, Border, Side
 
-# [설정] 텔레그램 정보
+# [설정]
 TOKEN = "8574978661:AAF5SXIgfpJlnAfN5ccSk0tJek_uSlCMBBo"
 CHAT_ID = "8564327930"
 
-# [주요 종목 한글 매핑]
-KR_NAMES = {
-    'AAPL': '애플', 'MSFT': '마이크로소프트', 'NVDA': '엔비디아', 'AMZN': '아마존',
-    'GOOGL': '알파벳A', 'GOOG': '알파벳C', 'META': '메타', 'TSLA': '테슬라',
-    'AVGO': '브로드컴', 'PEP': '펩시코', 'COST': '코스트코', 'ADBE': '어도비',
-    'CSCO': '시스코', 'NFLX': '넷플릭스', 'AMD': 'AMD', 'TMUS': '티모바일',
-    'INTU': '인튜이트', 'INTC': '인텔', 'AMAT': '어플라이드 머티어리얼즈', 'QCOM': '퀄컴',
-    'TXN': '텍사스 인스트루먼트', 'AMGN': '암젠', 'ISRG': '인튜이티브 서지컬', 'HON': '허니웰',
-    'BKNG': '부킹홀딩스', 'VRTX': '버텍스 파마슈티컬스', 'GILD': '길리어드 사이언스',
-    'SBUX': '스타벅스', 'MDLZ': '몬델리즈', 'ADP': 'ADP', 'PANW': '팔로알토 네트웍스',
-    'MELI': '메르카도리브레', 'REGN': '리제네론', 'MU': '마이크론 테크놀로지', 'SNPS': '시놉시스',
-    'KLAC': 'KLA', 'CDNS': '케이던스 디자인', 'PYPL': '페이팔', 'MAR': '메리어트',
-    'ASML': 'ASML', 'LRCX': '램 리서치', 'MNST': '몬스터 베버리지', 'ORLY': '오라일리',
-    'ADSK': '오토데스크', 'LULU': '룰루레몬', 'KDP': '큐리그 닥터 페퍼', 'PAYX': '페이첵스',
-    'FTNT': '포티넷', 'CHTR': '차터 커뮤니케이션즈', 'AEP': '아메리칸 일렉트릭 파워',
-    'PDD': '핀둬둬', 'NXPI': 'NXP 세미컨덕터', 'DXCM': '덱스콤', 'MCHP': '마이크로칩',
-    'CPRT': '코파트', 'ROST': '로스 스토어', 'IDXX': '아이덱스 래버러토리', 'PCAR': '파카',
-    'CSX': 'CSX', 'ODFL': '올드 도미니언', 'KVUE': '켄뷰', 'EXC': '엑셀론',
-    'BKR': '베이커 휴즈', 'GEHC': 'GE 헬스케어', 'CTAS': '신타스', 'WDAY': '워크데이',
-    'TEAM': '아틀라시안', 'DDOG': '데이터독', 'MRVL': '마벨 테크놀로지', 'ABNB': '에어비앤비',
-    'ORCL': '오라클', 'CTSH': '코그니전트', 'TTD': '더 트레이드 Desk', 'ON': '온 세미컨덕터',
-    'CEG': '컨스텔레이션 에너지', 'MDB': '몽고DB', 'ANSS': '앤시스', 'SPLK': '스플렁크',
-    'FAST': '패스널', 'DASH': '도어대시', 'ZSC': '지스케일러', 'ILMN': '일루미나',
-    'WBD': '워너 브라더스', 'AZN': '아스트라제네카', 'SGEN': '시애틀 제네틱스'
-}
-
-async def fetch_us_stock(row, search_start, search_end, mode):
+def get_final_korea_data():
+    print("📡 [1단계] 야후 파이낸스 직접 쿼리 시작 (KRX/네이버 우회)...")
+    
+    # 아까 에러 난 000... 대역 대신, 실제 우량주가 몰려있는 대역으로 정밀 타겟팅
+    # 삼성전자(005930), 현대차(005380) 등 005~009 대역과 코스닥 주요 대역
+    target_ranges = [
+        [f"{i:06d}.KS" for i in range(5000, 9999, 5)],   # 코스피 주요 대역
+        [f"{i:06d}.KQ" for i in range(30000, 150000, 50)] # 코스닥 주요 대역
+    ]
+    tickers = [item for sublist in target_ranges for item in sublist]
+    
+    print(f"🚀 총 {len(tickers)}개 후보 분석 시작... (차단 회피 모드)")
+    
     try:
-        symbol = row['Symbol']
-        h = fdr.DataReader(symbol, search_start, search_end)
-        if h.empty or len(h) < 2: return None
-        
-        last_idx = h.index[-1]
-        last_close = h.loc[last_idx, 'Close']
-        
-        if mode == 'daily':
-            prev_idx = h.index[-2]
-            prev_close = h.loc[prev_idx, 'Close']
-            ratio = round(((last_close - prev_close) / prev_close) * 100, 2)
-            final_date = last_idx.strftime('%Y-%m-%d')
-        else:
-            first_open = h.iloc[0]['Open']
-            ratio = round(((last_close - first_open) / first_open) * 100, 2)
-            final_date = f"{h.index[0].strftime('%m%d')}~{h.index[-1].strftime('%m%d')}"
-        
-        return {
-            '티커': symbol,
-            '종목명': KR_NAMES.get(symbol, row.get('Name', symbol)),
-            '종가': last_close,
-            '등락률': ratio,
-            '산업': row.get('Industry', '-'),
-            '기준일': final_date
-        }
+        # threads=True로 속도를 높이고, 데이터를 2일치만 가져와서 부하를 줄입니다.
+        raw = yf.download(tickers, period="2d", interval="1d", group_by='ticker', threads=True)
     except:
-        return None
+        return pd.DataFrame()
 
-async def send_us_report():
+    all_stocks = []
+    for ticker in tickers:
+        try:
+            if ticker not in raw.columns.levels[0]: continue
+            df_t = raw[ticker].dropna()
+            if len(df_t) < 2: continue
+            
+            curr_c = df_t['Close'].iloc[-1]
+            prev_c = df_t['Close'].iloc[-2]
+            vol = df_t['Volume'].iloc[-1]
+            
+            if curr_c <= 100 or vol < 1000: continue # 동전주 및 거래량 없는 주식 제외
+            
+            ratio = ((curr_c - prev_c) / prev_c) * 100
+            market = "KOSPI" if ticker.endswith(".KS") else "KOSDAQ"
+            
+            # 야후에서 제공하는 영문명이라도 가져옵니다 (차단된 국문명 대신)
+            all_stocks.append({
+                'Code': ticker.split('.')[0],
+                'Name': ticker.split('.')[0], # 일단 코드로 넣고, 엑셀에서 확인
+                'Market': market,
+                'Open': int(df_t['Open'].iloc[-1]),
+                'Close': int(curr_c),
+                'Low': int(df_t['Low'].iloc[-1]),
+                'High': int(df_t['High'].iloc[-1]),
+                'Ratio': float(ratio),
+                'Volume': int(vol)
+            })
+        except: continue
+
+    print(f"✅ 수집 완료: {len(all_stocks)}개 유효 종목 확보")
+    return pd.DataFrame(all_stocks)
+
+async def main():
     bot = Bot(token=TOKEN)
-    now = datetime.utcnow() + timedelta(hours=9)
-    day_of_week = now.weekday()
+    now = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
+    df = get_final_korea_data()
+    
+    if df.empty:
+        print("🚨 수집된 데이터가 없습니다.")
+        return
 
-    search_end = now.strftime('%Y-%m-%d')
-    search_start = (now - timedelta(days=10)).strftime('%Y-%m-%d')
-    mode = 'weekly' if day_of_week == 6 else 'daily'
+    is_sun = (now.weekday() == 6)
+    report_type = "주간평균" if is_sun else ("일일(금요마감)" if now.weekday() == 5 else "일일")
+    file_name = f"{now.strftime('%m%d')}_국내증시_{report_type}.xlsx"
+    
+    # [지수님 디자인 툴킷 적용]
+    h_map = {'Code':'CODE', 'Name':'NAME', 'Open':'시가', 'Close':'종가', 'Low':'저가', 'High':'고가', 'Ratio':'등락률(%)', 'Volume':'거래량'}
+    f_red, f_ora, f_yel = PatternFill("solid", "FF0000"), PatternFill("solid", "FFCC00"), PatternFill("solid", "FFFF00")
+    f_head, f_white = PatternFill("solid", "444444"), Font(color="FFFFFF", bold=True)
+    border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
 
-    try:
-        print(f"--- 분석 시작 (모드: {mode}) ---")
-        df_base = fdr.StockListing('NASDAQ')
-        df_target = df_base.head(800)
-
-        tasks = [fetch_us_stock(row, search_start, search_end, mode) for _, row in df_target.iterrows()]
-        results = await asyncio.gather(*tasks)
-        
-        df_raw = pd.DataFrame([r for r in results if r is not None])
-        
-        if df_raw.empty:
-            print("수집된 데이터가 없습니다.")
-            return
-
-        most_common_date = df_raw['기준일'].value_counts().idxmax()
-        df_final = df_raw[df_raw['기준일'] == most_common_date]
-
-        up_df = df_final[df_final['등락률'] >= 5].sort_values('등락률', ascending=False)
-        down_df = df_final[df_final['등락률'] <= -5].sort_values('등락률', ascending=True)
-
-        file_name = f"{now.strftime('%m%d')}_미국장_리포트.xlsx"
-        h_map = {'티커':'티커', '종목명':'종목명', '종가':'종가', '등락률':'등락률(%)', '산업':'산업'}
-
-        with pd.ExcelWriter(file_name, engine='openpyxl') as writer:
-            for s_name, data in [('상승_TOP', up_df), ('하락_TOP', down_df)]:
-                data[['티커','종목명','종가','등락률','산업']].rename(columns=h_map).to_excel(writer, sheet_name=s_name, index=False)
-                ws = writer.sheets[s_name]
+    with pd.ExcelWriter(file_name, engine='openpyxl') as writer:
+        for m in ['KOSPI', 'KOSDAQ']:
+            for trend in ['상승', '하락']:
+                # 5% 기준 필터링 (없으면 3%로 하향)
+                sub = df[(df['Market']==m) & ((df['Ratio']>=5) if trend=='상승' else (df['Ratio']<=-5))]
+                if len(sub) < 3:
+                    sub = df[(df['Market']==m) & ((df['Ratio']>=3) if trend=='상승' else (df['Ratio']<=-3))]
                 
-                # 가독성 개선 1: 컬럼 너비 최적화
-                ws.column_dimensions['A'].width = 12  # 티커
-                ws.column_dimensions['B'].width = 35  # 종목명 (충분히 넓게)
-                ws.column_dimensions['C'].width = 15  # 종가
-                ws.column_dimensions['D'].width = 15  # 등락률
-                ws.column_dimensions['E'].width = 45  # 산업 (긴 텍스트 대비)
+                sub = sub.sort_values('Ratio', ascending=(trend=='하락')).drop(columns=['Market']).rename(columns=h_map)
+                sheet_name = f"{m}_{trend}"
+                sub.to_excel(writer, sheet_name=sheet_name, index=False)
+                ws = writer.sheets[sheet_name]
 
-                for row in range(2, ws.max_row + 1):
-                    ratio_val = abs(float(ws.cell(row, 4).value or 0))
-                    name_cell = ws.cell(row, 2)
-                    
-                    # 가독성 개선 2: 종목명 강조 및 색상
-                    if ratio_val >= 20: 
-                        name_cell.fill = PatternFill("solid", fgColor="FFCC00")
-                        name_cell.font = Font(bold=True)
-                    elif ratio_val >= 10: 
-                        name_cell.fill = PatternFill("solid", fgColor="FFFF00")
-                    
-                    ws.cell(row, 3).number_format = '#,##0.00'
-                    ws.cell(row, 4).number_format = '0.00'
-                    
-                    # 가독성 개선 3: 정렬 조절
-                    for c in range(1, 6):
-                        if c == 2: # 종목명은 왼쪽 정렬이 가독성이 좋음
-                            ws.cell(row, c).alignment = Alignment(horizontal='left', vertical='center', indent=1)
-                        else:
-                            ws.cell(row, c).alignment = Alignment(horizontal='center', vertical='center')
+                # 헤더 스타일 (#444444)
+                for cell in ws[1]:
+                    cell.fill, cell.font, cell.alignment, cell.border = f_head, f_white, Alignment(horizontal='center'), border
 
-        async with bot:
-            msg = (f"🇺🇸 미국 나스닥 리포트 ({most_common_date})\n\n"
-                   f"📈 상승(5%↑): {len(up_df)}개\n"
-                   f"📉 하락(5%↓): {len(down_df)}개\n\n"
-                   f"💡가독성 최적화 완료")
-            await bot.send_document(CHAT_ID, open(file_name, 'rb'), caption=msg)
-        print(f"전송 완료: {most_common_date}")
+                # 본문 스타일 (중앙정렬, 콤마, 테두리, 강조색)
+                for r in range(2, ws.max_row + 1):
+                    try:
+                        rv = abs(float(ws.cell(r, 7).value or 0))
+                        name_cell = ws.cell(r, 2)
+                        if rv >= 28: name_cell.fill, name_cell.font = f_red, f_white
+                        elif rv >= 20: name_cell.fill = f_ora
+                        elif rv >= 10: name_cell.fill = f_yel
+                    except: pass
+                    
+                    for c in range(1, 9):
+                        ws.cell(r, c).alignment, ws.cell(r, c).border = Alignment(horizontal='center'), border
+                        if c in [3, 4, 5, 6, 8]: ws.cell(r, c).number_format = '#,##0'
+                        if c == 7: ws.cell(r, c).number_format = '0.00'
+                ws.column_dimensions['B'].width = 15
 
-    except Exception as e:
-        print(f"오류: {e}")
+    # 텔레그램 전송
+    async with bot:
+        msg = f"📅 {now.strftime('%Y-%m-%d')} {report_type} 리포트\n📊 분석 종목: {len(df)}개\n📈 상승(급등): {len(df[df['Ratio']>=5])}개"
+        with open(file_name, 'rb') as f:
+            await bot.send_document(CHAT_ID, f, caption=msg)
+    if os.path.exists(file_name): os.remove(file_name)
 
 if __name__ == "__main__":
-    asyncio.run(send_us_report())
+    asyncio.run(main())
