@@ -11,7 +11,7 @@ def fetch_naver_page(url):
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
         'Referer': 'https://finance.naver.com/sise/sise_market_sum.naver?sosok=0',
-        'Cookie': 'NID_AUT=dummy; NID_SES=dummy;' # 사람처럼 보이기 위한 가짜 쿠키
+        'Cookie': 'NID_AUT=dummy; NID_SES=dummy;'
     }
     try:
         resp = requests.get(url, headers=headers, timeout=15)
@@ -21,15 +21,12 @@ def fetch_naver_page(url):
 async def get_kospi_scan():
     fields = "field=quant&field=open&field=high&field=low&field=frate"
     all_stocks = []
-    
-    # 마지막 페이지 확인
     init_html = fetch_naver_page("https://finance.naver.com/sise/sise_market_sum.naver?sosok=0")
     last_page = int(max(map(int, re.findall(r'page=(\d+)', init_html)))) if init_html else 1
     
     print(f"📡 KOSPI 정밀 전수조사 시작 ({last_page}페이지)...")
 
     for page in range(1, last_page + 1):
-        # [핵심] 15페이지마다 5초간 길게 휴식 (네이버 보안 회피)
         if page % 15 == 0:
             print("☕ 네이버 눈피하기... 5초간 휴식")
             time.sleep(5)
@@ -38,18 +35,32 @@ async def get_kospi_scan():
         html = fetch_naver_page(url)
         
         if html and "종목명" in html:
-            soup = BeautifulSoup(html, 'html.parser')
-            table = soup.find('table', {'class': 'type_2'})
-            if table:
-                df = pd.read_html(io.StringIO(str(table)))[0].dropna(subset=['종목명'])
-                for col in ['등락률', '현재가', '시가', '고가', '저가', '거래량']:
-                    df[col] = pd.to_numeric(df[col].astype(str).str.replace(r'[%,\+]', '', regex=True), errors='coerce').fillna(0)
-                for _, row in df.iterrows():
-                    all_stocks.append({'Name': row['종목명'], 'Open': int(row['시가']), 'Close': int(row['현재가']), 
-                                       'Low': int(row['저가']), 'High': int(row['고가']), 'Ratio': float(row['등락률']), 'Volume': int(row['거래량'])})
-            time.sleep(random.uniform(1.2, 2.2)) # 페이지당 랜덤 지연
+            try:
+                soup = BeautifulSoup(html, 'html.parser')
+                table = soup.find('table', {'class': 'type_2'})
+                if table:
+                    df = pd.read_html(io.StringIO(str(table)))[0].dropna(subset=['종목명'])
+                    # [에러 해결] 열 이름 공백 제거 및 문자열 변환
+                    df.columns = [str(c).strip() for c in df.columns]
+                    
+                    # '시가' 열 존재 여부 확인 후 진행 (KeyError 방지)
+                    if '시가' in df.columns:
+                        for col in ['등락률', '현재가', '시가', '고가', '저가', '거래량']:
+                            if col in df.columns:
+                                df[col] = pd.to_numeric(df[col].astype(str).str.replace(r'[%,\+]', '', regex=True), errors='coerce').fillna(0)
+                        
+                        for _, row in df.iterrows():
+                            all_stocks.append({
+                                'Name': row['종목명'], 'Open': int(row['시가']), 'Close': int(row['현재가']), 
+                                'Low': int(row['저가']), 'High': int(row['고가']), 'Ratio': float(row['등락률']), 
+                                'Volume': int(row['거래량'])
+                            })
+                time.sleep(random.uniform(1.2, 2.2))
+            except Exception as e:
+                print(f"⚠️ {page}p 파싱 오류 발생: {e}")
+                continue
         else:
-            print(f"🛑 {page}p 차단 발생! 현재까지 데이터만 전송합니다.")
+            print(f"🛑 {page}p 차단 징후! 현재까지 데이터({len(all_stocks)}건)만 전송합니다.")
             break 
             
         if page % 10 == 0: print(f"✅ KOSPI {page}p 완료")
@@ -60,12 +71,13 @@ async def send_report():
     bot = Bot(token=TOKEN)
     now = datetime.utcnow() + timedelta(hours=9)
     df = await get_kospi_scan()
-    if df.empty: return
+    if df.empty:
+        print("❌ 수집된 데이터가 없어 중단합니다.")
+        return
 
     report_type = "주간평균" if now.weekday() == 6 else "일일"
     file_name = f"{now.strftime('%m%d')}_KOSPI_{report_type}.xlsx"
     
-    # 필터링 및 시트 구성 (상승/하락 5%)
     up_df = df[(df['Ratio'] >= 5.0) & (df['Volume'] > 0)].sort_values('Ratio', ascending=False)
     down_df = df[(df['Ratio'] <= -5.0) & (df['Volume'] > 0)].sort_values('Ratio', ascending=True)
     
