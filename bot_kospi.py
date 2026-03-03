@@ -1,4 +1,4 @@
-import os, pandas as pd, requests, asyncio
+import os, pandas as pd, requests, asyncio, time, random
 from datetime import datetime, timedelta
 from telegram import Bot
 from openpyxl.styles import Alignment, PatternFill, Font, Border, Side
@@ -7,44 +7,59 @@ TOKEN = "8574978661:AAF5SXIgfpJlnAfN5ccSk0tJek_uSlCMBBo"
 CHAT_ID = "8564327930"
 
 async def fetch_real_data(sosok):
-    # KOSPI: KOSPI, KOSDAQ: KOSDAQ
     market = "KOSPI" if sosok == 0 else "KOSDAQ"
     all_stocks = []
     
-    print(f"📡 {market} 모바일 엔진 가동 (전수조사 시작)...")
+    # 세션을 사용해 연결 유지 (차단 회피 핵심)
+    session = requests.Session()
     
-    # 네이버 모바일 증권 실제 데이터 API 주소
-    # pageSize를 100으로 올려서 요청 횟수를 줄여 차단 원천 방지
-    for page in range(1, 26): # 100개씩 25페이지면 2,500개 (상장사 전수조사)
+    print(f"📡 {market} 무적 엔진 가동 (전수조사 시작)...")
+    
+    for page in range(1, 26):
         url = f"https://m.stock.naver.com/api/stock/marketValue/{market}?page={page}&pageSize=100"
+        
+        # 실제 모바일 브라우저와 거의 동일한 정밀 헤더
         headers = {
-            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
-            'Referer': 'https://m.stock.naver.com/'
+            'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1',
+            'Accept': 'application/json, text/plain, */*',
+            'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Origin': 'https://m.stock.naver.com',
+            'Referer': f'https://m.stock.naver.com/marketindex/index.naver',
+            'Sec-Fetch-Dest': 'empty',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'same-origin'
         }
         
         try:
-            resp = requests.get(url, headers=headers, timeout=10)
+            resp = session.get(url, headers=headers, timeout=15)
+            
+            # JSON 데이터 확인
+            if resp.status_code != 200:
+                print(f"⚠️ {page}p 응답 실패: {resp.status_code}")
+                break
+                
             data = resp.json()
             stocks = data.get('stocks', [])
             
             if not stocks: break
             
             for s in stocks:
-                # API에서 주는 순수 숫자 데이터 바로 매핑
                 all_stocks.append({
                     'Name': s['stockName'],
                     'Close': int(s['closePrice'].replace(',', '')),
                     'Ratio': float(s['fluctuationsRatio']),
-                    'Volume': int(s['accumulatedTradingVolume']),
+                    'Volume': int(s['accumulatedTradingVolume'].replace(',', '')),
                     'Open': int(s['openPrice'].replace(',', '')),
                     'High': int(s['highPrice'].replace(',', '')),
                     'Low': int(s['lowPrice'].replace(',', ''))
                 })
             
-            if page % 5 == 0: print(f"✅ {page*100}위까지 수집 완료...")
+            print(f"✅ {page*100}위까지 수집 완료... (누적 {len(all_stocks)}개)")
+            # 차단 방지를 위한 인간적인 대기 시간
+            time.sleep(random.uniform(0.7, 1.5))
             
         except Exception as e:
-            print(f"⚠️ {page}p 오류: {e}")
+            print(f"⚠️ {page}p 수집 중 오류: {e}")
             break
             
     return pd.DataFrame(all_stocks)
@@ -53,12 +68,11 @@ async def main():
     bot = Bot(token=TOKEN)
     now = datetime.utcnow() + timedelta(hours=9)
     
-    # 0은 코스피, 1은 코스닥 (파일명에 맞춰 수정하세요)
-    # KOSPI용 파일이면 0, KOSDAQ용 파일이면 1
+    # KOSPI: 0, KOSDAQ: 1 (파일별로 수정)
     df = await fetch_real_data(0) 
     
     if df.empty:
-        print("❌ 모바일 엔진으로도 데이터를 가져오지 못했습니다.")
+        print("❌ 네이버 차단으로 데이터를 가져오지 못했습니다. 헤더 재점검이 필요합니다.")
         return
 
     r_type = "주간평균" if now.weekday() == 6 else "일일"
@@ -93,10 +107,16 @@ async def main():
                     if c == 6: ws.cell(r, c).number_format = '0.00'
             ws.column_dimensions['A'].width = 18
 
-    msg = f"📅 {now.strftime('%m-%d')} *[KOSPI {r_type}]*\n📊 전수조사: {len(df)}개 완료\n📈 상승: {len(up_df)} / 📉 하락: {len(down_df)}\n💡 🔴28% 🟠20% 🟡10%"
-    with open(file_name, 'rb') as f:
-        await bot.send_document(CHAT_ID, document=f, caption=msg, parse_mode="Markdown")
-    if os.path.exists(file_name): os.remove(file_name)
+    msg = f"📅 {now.strftime('%m-%d')} *[KOSPI {r_type}]*\n📊 전수조사: {len(df)}개 완료\n📈 상승: {len(up_df)} / 📉 하락: {len(down_df)}"
+    
+    try:
+        with open(file_name, 'rb') as f:
+            await bot.send_document(CHAT_ID, document=f, caption=msg, parse_mode="Markdown")
+        print("🚀 전송 성공!")
+    except Exception as e:
+        print(f"❌ 텔레그램 발송 실패: {e}")
+    finally:
+        if os.path.exists(file_name): os.remove(file_name)
 
 if __name__ == "__main__":
     asyncio.run(main())
