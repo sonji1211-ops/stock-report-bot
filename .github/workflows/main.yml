@@ -24,38 +24,25 @@ jobs:
           python -m pip install --upgrade pip
           pip install "numpy<2.0.0" 
           pip install pandas==2.0.3 
-          pip install yfinance 
-          pip install yahooquery  # <--- 이 줄을 꼭 추가해주세요!
+          pip install yahooquery
           pip install finance-datareader 
           pip install openpyxl 
           pip install python-telegram-bot 
-          pip install requests 
-          pip install lxml 
-          pip install beautifulsoup4
+          pip install requests lxml beautifulsoup4
 
-      # [국장 1단계] 코스피 수집 및 전송 (야후 엔진)
-      - name: Run KOSPI Report
-        run: python bot_kospi.py
+      # [국장 통합본] 코스피 & 코스닥 수집 및 전송
+      - name: Run Korea Stock Bot
+        run: python bot.py
         env:
           PYTHONIOENCODING: utf-8
 
-      - name: Wait for Bypass
-        run: sleep 30
-
-      # [국장 2단계] 코스닥 수집 및 전송 (야후 엔진)
-      - name: Run KOSDAQ Report
-        run: python bot_kosdaq.py
-        env:
-          PYTHONIOENCODING: utf-8
+      - name: Wait for US Market
+        run: sleep 10
 
       # 미국장 (기존 유지)
       - name: Run US Stock Bot
         run: python us_bot.py
-        env:
-          PYTHONIOENCODING: utf-8
 
       # 미국 ETF (기존 유지)
       - name: Run US ETF Bot
         run: python us_etf_bot.py
-        env:
-          PYTHONIOENCODING: utf-8
