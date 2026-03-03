@@ -27,7 +27,6 @@ async def get_kosdaq_scan():
     print(f"📡 KOSDAQ 정밀 전수조사 시작 ({last_page}페이지)...")
 
     for page in range(1, last_page + 1):
-        # 코스닥은 종목이 더 많으므로 10페이지마다 5초 휴식
         if page % 10 == 0:
             print("☕ 네이버 눈피하기... 5초간 휴식")
             time.sleep(5)
@@ -36,18 +35,31 @@ async def get_kosdaq_scan():
         html = fetch_naver_page(url)
         
         if html and "종목명" in html:
-            soup = BeautifulSoup(html, 'html.parser')
-            table = soup.find('table', {'class': 'type_2'})
-            if table:
-                df = pd.read_html(io.StringIO(str(table)))[0].dropna(subset=['종목명'])
-                for col in ['등락률', '현재가', '시가', '고가', '저가', '거래량']:
-                    df[col] = pd.to_numeric(df[col].astype(str).str.replace(r'[%,\+]', '', regex=True), errors='coerce').fillna(0)
-                for _, row in df.iterrows():
-                    all_stocks.append({'Name': row['종목명'], 'Open': int(row['시가']), 'Close': int(row['현재가']), 
-                                       'Low': int(row['저가']), 'High': int(row['고가']), 'Ratio': float(row['등락률']), 'Volume': int(row['거래량'])})
-            time.sleep(random.uniform(1.2, 2.5)) # 코스닥은 더 천천히
+            try:
+                soup = BeautifulSoup(html, 'html.parser')
+                table = soup.find('table', {'class': 'type_2'})
+                if table:
+                    df = pd.read_html(io.StringIO(str(table)))[0].dropna(subset=['종목명'])
+                    # [에러 해결] 열 이름 공백 제거
+                    df.columns = [str(c).strip() for c in df.columns]
+                    
+                    if '시가' in df.columns:
+                        for col in ['등락률', '현재가', '시가', '고가', '저가', '거래량']:
+                            if col in df.columns:
+                                df[col] = pd.to_numeric(df[col].astype(str).str.replace(r'[%,\+]', '', regex=True), errors='coerce').fillna(0)
+                        
+                        for _, row in df.iterrows():
+                            all_stocks.append({
+                                'Name': row['종목명'], 'Open': int(row['시가']), 'Close': int(row['현재가']), 
+                                'Low': int(row['저가']), 'High': int(row['고가']), 'Ratio': float(row['등락률']), 
+                                'Volume': int(row['거래량'])
+                            })
+                time.sleep(random.uniform(1.2, 2.5))
+            except Exception as e:
+                print(f"⚠️ {page}p 파싱 오류 발생: {e}")
+                continue
         else:
-            print(f"🛑 {page}p 차단 발생! 현재까지 데이터만 전송합니다.")
+            print(f"🛑 {page}p 차단 징후! 현재까지 데이터({len(all_stocks)}건)만 전송합니다.")
             break 
             
         if page % 10 == 0: print(f"✅ KOSDAQ {page}p 완료")
@@ -58,7 +70,9 @@ async def send_report():
     bot = Bot(token=TOKEN)
     now = datetime.utcnow() + timedelta(hours=9)
     df = await get_kosdaq_scan()
-    if df.empty: return
+    if df.empty:
+        print("❌ 수집된 데이터가 없어 중단합니다.")
+        return
 
     report_type = "주간평균" if now.weekday() == 6 else "일일"
     file_name = f"{now.strftime('%m%d')}_KOSDAQ_{report_type}.xlsx"
