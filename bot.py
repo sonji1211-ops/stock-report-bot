@@ -4,12 +4,33 @@ import pandas as pd
 from datetime import datetime, timedelta
 import asyncio
 from telegram import Bot
-from openpyxl.styles import Alignment, PatternFill, Font
+from openpyxl.styles import Alignment, PatternFill, Font, Border, Side
 import time
 
 # [설정] 텔레그램 정보
 TOKEN = "8574978661:AAF5SXIgfpJlnAfN5ccSk0tJek_uSlCMBBo"
 CHAT_ID = "8564327930" 
+
+async def fetch_stock_data(row, start_d, end_d, semaphore):
+    async with semaphore:
+        try:
+            suffix = ".KS" if row['Market'] == 'KOSPI' else ".KQ"
+            ticker = f"{row['Code']}{suffix}"
+            df = fdr.DataReader(ticker, start_d, end_d)
+            if df is None or len(df) < 2: return None
+            
+            last_c = float(df.iloc[-1]['Close'])
+            prev_c = float(df.iloc[-2]['Close'])
+            ratio = round(((last_c - prev_c) / prev_c) * 100, 2)
+            
+            return {
+                'Code': row['Code'], 'Name': row['Name'], 
+                'Open': df.iloc[-1]['Open'], 'Close': last_c,
+                'Low': df['Low'].min(), 'High': df['High'].max(), 
+                'Ratio': ratio, 'Volume': df.iloc[-1]['Volume'],
+                'Market': row['Market']
+            }
+        except: return None
 
 async def send_smart_report():
     bot = Bot(token=TOKEN)
@@ -17,123 +38,94 @@ async def send_smart_report():
     day_of_week = now.weekday() 
 
     try:
-        # 1. 전 종목 리스트 확보 (차단 대비 리트라이)
-        df_base = None
-        for _ in range(3):
-            try:
-                df_base = fdr.StockListing('KRX')
-                if df_base is not None and not df_base.empty: break
-            except:
-                time.sleep(2)
-        
+        df_base = fdr.StockListing('KRX')
         if df_base is None or df_base.empty: return
 
-        # 2. 요일별 모드 설정 (지수님 요청 로직 정확히 반영)
-        if day_of_week == 6: # [일요일] 주간 정밀 분석
-            report_type = "주간평균"
+        sem = asyncio.Semaphore(15) # 속도를 조금 더 높임
+        
+        if day_of_week == 6:
+            report_type, analysis_info = "주간평균", "시총 상위 500"
             end_d = (now - timedelta(days=2)).strftime('%Y-%m-%d')
             start_d = (now - timedelta(days=6)).strftime('%Y-%m-%d')
-            
-            # [기능유지] 시총 상위 500개
             df_target = df_base.sort_values(by='Marcap', ascending=False).head(500).copy()
-            sem = asyncio.Semaphore(5) # Expecting value 에러 방지를 위해 접속 수 제한
+        else:
+            report_type, analysis_info = "일일", "전 종목 전수조사"
+            if day_of_week == 5: report_type = "일일(금요마감)"
+            end_d = now.strftime('%Y-%m-%d')
+            start_d = (now - timedelta(days=5)).strftime('%Y-%m-%d')
+            df_target = df_base.copy()
 
-            async def fetch_weekly(row, semaphore):
-                async with semaphore:
-                    try:
-                        # [오류수정] Yahoo 소스 우회로 서버 차단 방지
-                        ticker = f"{row['Code']}.KS" if row['Market'] == 'KOSPI' else f"{row['Code']}.KQ"
-                        h = fdr.DataReader(ticker, start_d, end_d)
-                        if h is None or len(h) < 2: return None
-                        h['rt'] = h['Close'].pct_change() * 100
-                        return {
-                            'Code': row['Code'], 'Name': row['Name'], 
-                            'Open': h.iloc[-1]['Open'], 'Close': h.iloc[-1]['Close'],
-                            'Low': h['Low'].min(), 'High': h['High'].max(), 
-                            'Ratio': round(h['rt'].mean(), 2), 'Volume': h.iloc[-1]['Volume'],
-                            'Market': row['Market']
-                        }
-                    except: return None
-
-            tasks = [fetch_weekly(row, sem) for _, row in df_target.iterrows()]
-            results = await asyncio.gather(*tasks)
-            df_final = pd.DataFrame([r for r in results if r is not None])
-            target_date_str = f"{start_d}~{end_d}"
-            analysis_info = "시가총액 상위 500"
-
-        else: # [화~토] 일일 초고속 분석 (전 종목)
-            report_type = "일일"
-            if day_of_week == 5: report_type = "일일(금요일마감)" # [복구] 명칭 유지
-            target_date_str = now.strftime('%Y-%m-%d')
-            
-            # [복구] 지수님 원본의 정교한 형변환 로직
-            df_base['Close'] = pd.to_numeric(df_base['Close'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-            df_base['Changes'] = pd.to_numeric(df_base['Changes'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-            df_base['Volume'] = pd.to_numeric(df_base['Volume'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-            
-            ratio_col = next((c for c in ['ChgPct', 'ChangesRatio', 'FlucRate'] if c in df_base.columns), None)
-            if ratio_col:
-                df_base['Ratio'] = pd.to_numeric(df_base[ratio_col], errors='coerce').fillna(0)
-                if df_base['Ratio'].max() <= 1.0: df_base['Ratio'] *= 100
-            else:
-                df_base['Ratio'] = (df_base['Changes'] / (df_base['Close'] - df_base['Changes']).replace(0, 1) * 100).fillna(0)
-            
-            # [복구] 지수님 요청 컬럼 순서
-            df_final = df_base[['Code', 'Name', 'Open', 'Close', 'Low', 'High', 'Ratio', 'Volume', 'Market']].copy()
-            analysis_info = "전 종목 전수조사"
-
+        tasks = [fetch_stock_data(row, start_d, end_d, sem) for _, row in df_target.iterrows()]
+        results = await asyncio.gather(*tasks)
+        df_final = pd.DataFrame([r for r in results if r is not None])
         if df_final.empty: return
 
-        # 3. 분류 로직 (지수님 원본 시트명 및 필터링 유지)
+        # 시트 분류 및 이름 변경
         h_map = {'Code':'종목코드', 'Name':'종목명', 'Open':'시가', 'Close':'종가', 'Low':'저가', 'High':'고가', 'Ratio':'등락률(%)', 'Volume':'거래량'}
-        
-        def get_sub_market(market_name, is_up):
-            temp = df_final[df_final['Market'].str.contains(market_name, na=False)].copy()
+        def get_data(m_name, is_up):
+            temp = df_final[df_final['Market'].str.contains(m_name, na=False)].copy()
             cond = (temp['Ratio'] >= 5) if is_up else (temp['Ratio'] <= -5)
             return temp[cond].sort_values('Ratio', ascending=not is_up).rename(columns=h_map).drop(columns=['Market'])
 
-        sheets_data = {
-            '코스피_상승': get_sub_market('KOSPI', True), '코스닥_상승': get_sub_market('KOSDAQ', True),
-            '코스피_하락': get_sub_market('KOSPI', False), '코스닥_하락': get_sub_market('KOSDAQ', False)
-        }
+        sheets = {'코스피_상승': get_data('KOSPI', True), '코스닥_상승': get_data('KOSDAQ', True),
+                  '코스피_하락': get_data('KOSPI', False), '코스닥_하락': get_data('KOSDAQ', False)}
 
-        # 4. 엑셀 생성 및 디자인 (지수님 원본 디자인 100%)
+        # 엑셀 디자인 설정
         file_name = f"{now.strftime('%m%d')}_{report_type}.xlsx"
-        fill_red, fill_orange, fill_yellow = PatternFill("solid", fgColor="FF0000"), PatternFill("solid", fgColor="FFCC00"), PatternFill("solid", fgColor="FFFF00")
-        font_white = Font(color="FFFFFF", bold=True)
+        header_fill = PatternFill("solid", fgColor="444444") # 진회색 헤더
+        header_font = Font(color="FFFFFF", bold=True)
+        fills = [PatternFill("solid", fgColor="FF0000"), # 28%↑ 빨강
+                 PatternFill("solid", fgColor="FFBB00"), # 20%↑ 주황
+                 PatternFill("solid", fgColor="FFFF00")] # 10%↑ 노랑
+        border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
 
         with pd.ExcelWriter(file_name, engine='openpyxl') as writer:
-            for s_name, data in sheets_data.items():
+            for s_name, data in sheets.items():
                 data.to_excel(writer, sheet_name=s_name, index=False)
                 ws = writer.sheets[s_name]
+                
+                # 헤더 디자인
+                for cell in ws[1]:
+                    cell.fill, cell.font, cell.alignment = header_fill, header_font, Alignment(horizontal='center')
+                
+                # 데이터 본문 디자인
                 for row in range(2, ws.max_row + 1):
-                    # [복구] 모든 셀 가운데 정렬
-                    for col in range(1, 9):
-                        ws.cell(row, col).alignment = Alignment(horizontal='center', vertical='center')
-                    
-                    # [복구] 등락률 강조 색상 로직
-                    ratio_val = abs(float(ws.cell(row, 7).value or 0))
+                    ratio = abs(float(ws.cell(row, 7).value or 0))
                     name_cell = ws.cell(row, 2)
-                    if ratio_val >= 28: name_cell.fill, name_cell.font = fill_red, font_white
-                    elif ratio_val >= 20: name_cell.fill = fill_orange
-                    elif ratio_val >= 10: name_cell.fill = fill_yellow
                     
-                    # [복구] 숫자 콤마 및 소수점 포맷팅
-                    for col_idx in [3, 4, 5, 6, 8]: 
-                        ws.cell(row, col_idx).number_format = '#,##0'
-                    ws.cell(row, 7).number_format = '0.00'
+                    # 강조 로직
+                    if ratio >= 28: name_cell.fill, name_cell.font = fills[0], Font(color="FFFFFF", bold=True)
+                    elif ratio >= 20: name_cell.fill = fills[1]
+                    elif ratio >= 10: name_cell.fill = fills[2]
+                    
+                    # 서식 적용
+                    for col in range(1, 9):
+                        ws.cell(row, col).alignment = Alignment(horizontal='center')
+                        ws.cell(row, col).border = border
+                        if col in [3,4,5,6,8]: ws.cell(row, col).number_format = '#,##0'
+                        if col == 7: ws.cell(row, col).number_format = '0.00'
 
-                for i in range(1, 9): ws.column_dimensions[chr(64+i)].width = 15
+                # 열 너비 자동 최적화
+                ws.column_dimensions['B'].width = 20 # 종목명은 길게
+                for char in "ACDEFGH": ws.column_dimensions[char].width = 12
 
-        # 5. 전송 (지수님 원본 메시지 형식 복구)
+        # 텔레그램 메시지 가독성 최적화
         async with bot:
-            msg = (f"📅 {target_date_str} {report_type} 리포트 배달완료!\n\n"
-                   f"📊 분석기준: {analysis_info}\n"
-                   f"📈 상승(5%↑): {len(sheets_data['코스피_상승'])+len(sheets_data['코스닥_상승'])}개\n"
-                   f"📉 하락(5%↓): {len(sheets_data['코스피_하락'])+len(sheets_data['코스닥_하락'])}개\n\n"
-                   f"💡 🟡10%↑, 🟠20%↑, 🔴28%↑") # [복구] 가이드 문구 추가
-            await bot.send_document(CHAT_ID, open(file_name, 'rb'), caption=msg)
+            date_str = f"{start_d}~{end_d}" if day_of_week == 6 else now.strftime('%Y-%m-%d')
+            msg = (f"📦 *[{report_type}] 주식 리포트 도착*\n\n"
+                   f"📅 *날짜:* {date_str}\n"
+                   f"🔍 *대상:* {analysis_info}\n"
+                   f"───\n"
+                   f"📈 *상승(5%↑):* {len(sheets['코스피_상승'])+len(sheets['코스닥_상승'])}개\n"
+                   f"📉 *하락(5%↓):* {len(sheets['코스피_하락'])+len(sheets['코스닥_하락'])}개\n\n"
+                   f"💡 *강조 안내*\n"
+                   f"🔴 28%↑ | 🟠 20%↑ | 🟡 10%↑")
+            await bot.send_document(CHAT_ID, open(file_name, 'rb'), caption=msg, parse_mode="Markdown")
 
+    except Exception as e: print(f"오류: {e}")
+
+if __name__ == "__main__":
+    asyncio.run(send_smart_report())
     except Exception as e: print(f"오류: {e}")
 
 if __name__ == "__main__":
