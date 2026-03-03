@@ -5,35 +5,53 @@ from datetime import datetime, timedelta
 import asyncio
 from telegram import Bot
 from openpyxl.styles import Alignment, PatternFill, Font, Border, Side
-import time
+import random
 
 # [설정] 텔레그램 정보
 TOKEN = "8574978661:AAF5SXIgfpJlnAfN5ccSk0tJek_uSlCMBBo"
-CHAT_ID = "8564327930" 
+CHAT_ID = "8564327930"
 
 async def fetch_stock_data(row, start_d, end_d, semaphore):
-    """서버 차단을 피하기 위해 요청 간격에 미세한 지연을 추가합니다."""
+    """다음, 야후, 구글, 네이버 순으로 데이터를 끝까지 찾아옵니다."""
     async with semaphore:
+        code = row['Code']
+        name = row['Name']
+        market = row['Market']
+        
+        # 서버 감시 피하기 위한 랜덤 지연
+        await asyncio.sleep(random.uniform(0.2, 0.4))
+        
+        df = None
+        # 4대 소스 순차 시도
+        for src in ['daum', 'yahoo', 'google', 'naver']:
+            try:
+                ticker = code
+                # 소스별 티커 형식 맞춤
+                if src == 'yahoo':
+                    ticker = f"{code}.KS" if market == 'KOSPI' else f"{code}.KQ"
+                elif src == 'google':
+                    ticker = f"KRX:{code}"
+                
+                df = fdr.DataReader(ticker, start_d, end_d)
+                if df is not None and len(df) >= 2:
+                    break # 데이터 찾으면 루프 탈출
+            except:
+                continue # 실패하면 다음 소스로
+        
+        if df is None or len(df) < 2:
+            return None
+
         try:
-            # 야후 소스를 사용하되 요청 전 0.5초 대기 (차단 방지)
-            await asyncio.sleep(0.5) 
-            suffix = ".KS" if row['Market'] == 'KOSPI' else ".KQ"
-            ticker = f"{row['Code']}{suffix}"
-            
-            df = fdr.DataReader(ticker, start_d, end_d)
-            if df is None or len(df) < 2:
-                return None
-            
             last_c = float(df.iloc[-1]['Close'])
             prev_c = float(df.iloc[-2]['Close'])
             ratio = round(((last_c - prev_c) / prev_c) * 100, 2)
             
             return {
-                'Code': row['Code'], 'Name': row['Name'], 
+                'Code': code, 'Name': name, 
                 'Open': df.iloc[-1]['Open'], 'Close': last_c,
                 'Low': df['Low'].min(), 'High': df['High'].max(), 
                 'Ratio': ratio, 'Volume': df.iloc[-1]['Volume'],
-                'Market': row['Market']
+                'Market': market
             }
         except:
             return None
@@ -41,44 +59,40 @@ async def fetch_stock_data(row, start_d, end_d, semaphore):
 async def send_smart_report():
     bot = Bot(token=TOKEN)
     now = datetime.utcnow() + timedelta(hours=9)
-    day_of_week = now.weekday() 
+    day_of_week = now.weekday()
 
     try:
-        # [핵심 수정] StockListing 자체가 막히는 경우를 대비해 예외 처리
-        try:
-            df_base = fdr.StockListing('KRX')
-        except:
-            # KRX가 막히면 KOSPI/KOSDAQ 따로 시도
-            df_base = pd.concat([fdr.StockListing('KOSPI'), fdr.StockListing('KOSDAQ')])
-
+        # 1. 실시간 종목 리스트 (KRX)
+        df_base = fdr.StockListing('KRX')
         if df_base is None or df_base.empty:
             return
 
-        # [안전 장치] 동시 접속을 5개로 대폭 제한 (천천히 가져오기)
-        sem = asyncio.Semaphore(5)
-        
-        if day_of_week == 6: # 일요일
+        # 2. 분석 모드 (지수님 원본 로직)
+        if day_of_week == 6: # 일요일: 주간 500개
             report_type, analysis_info = "주간평균", "시총 상위 500"
+            df_target = df_base.sort_values(by='Marcap', ascending=False).head(500).copy()
             end_d = (now - timedelta(days=2)).strftime('%Y-%m-%d')
             start_d = (now - timedelta(days=6)).strftime('%Y-%m-%d')
-            df_target = df_base.sort_values(by='Marcap', ascending=False).head(500).copy()
-        else: # 평일
+        else: # 평일: 전 종목 전수조사
             report_type, analysis_info = "일일", "전 종목 전수조사"
             if day_of_week == 5: report_type = "일일(금요마감)"
-            end_d = now.strftime('%Y-%m-%d')
-            start_d = (now - timedelta(days=5)).strftime('%Y-%m-%d')
-            # [임시 조치] 만약 전수조사에서 계속 터진다면 head(1000)으로 줄여서 테스트해보세요
             df_target = df_base.copy()
+            end_d = now.strftime('%Y-%m-%d')
+            start_d = (now - timedelta(days=4)).strftime('%Y-%m-%d')
 
+        # 3. 비동기 수집 (안전하게 10개씩 동시 처리)
+        sem = asyncio.Semaphore(10)
+        print(f"[{report_type}] 수집 시작 (전방위 우회 모드)...")
+        
         tasks = [fetch_stock_data(row, start_d, end_d, sem) for _, row in df_target.iterrows()]
         results = await asyncio.gather(*tasks)
         df_final = pd.DataFrame([r for r in results if r is not None])
-        
+
         if df_final.empty:
-            print("데이터 수집 실패: 모든 요청이 차단되었습니다.")
+            print("모든 웹사이트에서 차단되었습니다.")
             return
 
-        # --- 이하 디자인 및 전송 로직 동일 ---
+        # 4. 분류 및 엑셀 (지수님 디자인 100% 반영)
         h_map = {'Code':'종목코드', 'Name':'종목명', 'Open':'시가', 'Close':'종가', 'Low':'저가', 'High':'고가', 'Ratio':'등락률(%)', 'Volume':'거래량'}
         def get_data(m_name, is_up):
             temp = df_final[df_final['Market'].str.contains(m_name, na=False)].copy()
@@ -89,11 +103,8 @@ async def send_smart_report():
                   '코스피_하락': get_data('KOSPI', False), '코스닥_하락': get_data('KOSDAQ', False)}
 
         file_name = f"{now.strftime('%m%d')}_{report_type}.xlsx"
-        # (디자인 생략 - 위 코드와 동일하게 유지됨)
-        # [생략된 디자인 코드는 위에서 드린 '가독성 최적화' 버전과 100% 같습니다]
-        # ... 디자인 로직 적용 ...
-
-        # [디자인 적용을 위해 위 코드의 엑셀 디자인 부분을 그대로 넣어주세요]
+        
+        # 엑셀 서식 (가운데 정렬, 콤마, 강조 색상)
         header_fill = PatternFill("solid", fgColor="444444")
         header_font = Font(color="FFFFFF", bold=True)
         fills = [PatternFill("solid", fgColor="FF0000"), PatternFill("solid", fgColor="FFBB00"), PatternFill("solid", fgColor="FFFF00")]
@@ -119,15 +130,12 @@ async def send_smart_report():
                 ws.column_dimensions['B'].width = 20
                 for char in "ACDEFGH": ws.column_dimensions[char].width = 12
 
+        # 5. 전송
         async with bot:
-            date_str = f"{start_d}~{end_d}" if day_of_week == 6 else now.strftime('%Y-%m-%d')
-            msg = (f"📦 *[{report_type}] 리포트 (차단우회 모드)*\n\n"
-                   f"📅 *날짜:* {date_str}\n"
-                   f"🔍 *대상:* {analysis_info}\n"
-                   f"───\n"
-                   f"📈 *상승(5%↑):* {len(sheets['코스피_상승'])+len(sheets['코스닥_상승'])}개\n"
-                   f"📉 *하락(5%↓):* {len(sheets['코스피_하락'])+len(sheets['코스닥_하락'])}개\n\n"
-                   f"💡 *안내:* 서버 IP 차단으로 인해 수집 속도가 제한되었습니다.")
+            msg = (f"📅 {now.strftime('%Y-%m-%d')} *[{report_type}] 통합 리포트*\n\n"
+                   f"📈 상승(5%↑): {len(sheets['코스피_상승'])+len(sheets['코스닥_상승'])}개\n"
+                   f"📉 하락(5%↓): {len(sheets['코스피_하락'])+len(sheets['코스닥_하락'])}개\n\n"
+                   f"💡 4대 포털(다음/야후/구글/네이버) 데이터 통합 분석")
             await bot.send_document(CHAT_ID, open(file_name, 'rb'), caption=msg, parse_mode="Markdown")
 
     except Exception as e:
