@@ -1,16 +1,13 @@
-import os
+import os, pandas as pd, asyncio, datetime, time
 import FinanceDataReader as fdr
-import pandas as pd
-from datetime import datetime, timedelta
-import asyncio
 from telegram import Bot
-from openpyxl.styles import Alignment, PatternFill, Font
+from openpyxl.styles import Alignment, PatternFill, Font, Border, Side
 
-# [설정] 텔레그램 정보
+# [설정] 
 TOKEN = "8574978661:AAF5SXIgfpJlnAfN5ccSk0tJek_uSlCMBBo"
 CHAT_ID = "8564327930"
 
-# [전종목 리스트]
+# [전종목 리스트] - 지수님 리스트 그대로 유지
 ASSET_NAMES = {
     'KS11': '코스피 지수', 'KQ11': '코스닥 지수', 
     'USD/KRW': '달러/원 환율', 'JPY/KRW': '엔/원 환율', 
@@ -34,9 +31,10 @@ ASSET_NAMES = {
 
 async def fetch_asset_data(symbol, s_date):
     try:
+        # FinanceDataReader는 야후 서버를 찌르므로 간격을 약간 둡니다.
         df = fdr.DataReader(symbol, s_date)
         
-        # 위안화 누락 방지: 첫 번째 티커 실패 시 대체 티커 시도
+        # 위안화 등 예외 처리
         if (df is None or df.empty) and symbol == 'CNY/KRW':
             df = fdr.DataReader('CNYKRW=X', s_date)
             
@@ -44,63 +42,75 @@ async def fetch_asset_data(symbol, s_date):
         
         last_c = float(df.iloc[-1]['Close'])
         prev_c = float(df.iloc[-2]['Close'])
-        ratio = round(((last_c - prev_c) / prev_c) * 100, 2)
+        ratio = ((last_c - prev_c) / prev_c) * 100
             
         return {'티커': symbol, '항목명': ASSET_NAMES.get(symbol, symbol), '현재가': last_c, '등락률': ratio}
     except:
         return None
 
-async def send_report():
+async def main():
     bot = Bot(token=TOKEN)
-    now = datetime.utcnow() + timedelta(hours=9)
-    s_date = (now - timedelta(days=30)).strftime('%Y-%m-%d')
+    now = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
+    s_date = (now - datetime.timedelta(days=7)).strftime('%Y-%m-%d')
 
-    tasks = [fetch_asset_data(s, s_date) for s in ASSET_NAMES.keys()]
-    results = await asyncio.gather(*tasks)
-    df = pd.DataFrame([r for r in results if r is not None])
+    print(f"📡 글로벌 종합 리포트 수집 중... (대상: {len(ASSET_NAMES)}종)")
     
-    if df.empty: return
+    # [차단 방지] 비동기로 한꺼번에 부르지 않고 0.2초 간격으로 조심조심 수집
+    results = []
+    for s in ASSET_NAMES.keys():
+        res = await fetch_asset_data(s, s_date)
+        if res: results.append(res)
+        await asyncio.sleep(0.2) 
 
+    df = pd.DataFrame(results)
+    if df.empty:
+        print("❌ 수집된 데이터가 없습니다.")
+        return
+
+    # [엑셀 디자인]
     file_name = f"{now.strftime('%m%d')}_종합_리포트.xlsx"
     yellow_fill = PatternFill(start_color='FFFF00', end_color='FFFF00', fill_type='solid')
+    header_fill = PatternFill(start_color='444444', end_color='444444', fill_type='solid')
+    white_font = Font(color='FFFFFF', bold=True)
+    border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
 
     with pd.ExcelWriter(file_name, engine='openpyxl') as writer:
-        df[['티커','항목명','현재가','등락률']].rename(columns={'등락률':'등락률(%)'}).to_excel(writer, sheet_name='현황', index=False)
+        df.rename(columns={'등락률':'등락률(%)'}).to_excel(writer, sheet_name='현황', index=False)
         ws = writer.sheets['현황']
         
         ws.column_dimensions['A'].width = 15
-        ws.column_dimensions['B'].width = 30
-        ws.column_dimensions['C'].width = 25
+        ws.column_dimensions['B'].width = 25
+        ws.column_dimensions['C'].width = 20
         ws.column_dimensions['D'].width = 15
 
-        for row in range(1, ws.max_row + 1):
-            # [수정] 모든 셀 가운데 정렬 (종목명 포함)
-            for col in range(1, 5):
-                ws.cell(row, col).alignment = Alignment(horizontal='center', vertical='center')
-
-            if row > 1:
-                # [에러 방지] 빈 값 검사 후 숫자로 변환
-                val = ws.cell(row, 4).value
-                ratio_val = abs(float(val)) if val is not None and val != '' else 0
-
-                # 3% 이상 강조
-                if ratio_val >= 3:
-                    for col in range(1, 5):
-                        ws.cell(row, col).fill = yellow_fill
-                        ws.cell(row, col).font = Font(bold=True)
+        for r in range(1, ws.max_row + 1):
+            for c in range(1, 5):
+                cell = ws.cell(r, c)
+                cell.alignment = Alignment(horizontal='center', vertical='center')
+                cell.border = border
                 
-                # 원화 표시 대상
-                t = str(ws.cell(row, 1).value)
-                if col == 4: # 루프 내 마지막 컬럼 처리 시 서식 적용
-                    if '-KRW' in t or t.isdigit() or '/KRW' in t or 'KS11' in t:
-                        ws.cell(row, 3).number_format = '"₩"#,##0.00'
-                    else:
-                        ws.cell(row, 3).number_format = '#,##0.00'
-                    ws.cell(row, 4).number_format = '0.00'
+                if r == 1: # 헤더
+                    cell.fill, cell.font = header_fill, white_font
+                else:
+                    # 3% 이상 강조
+                    ratio_val = abs(float(ws.cell(r, 4).value or 0))
+                    if ratio_val >= 3:
+                        cell.fill = yellow_fill
+                        cell.font = Font(bold=True)
+            
+            if r > 1:
+                # 숫자 포맷
+                t = str(ws.cell(r, 1).value)
+                if '-KRW' in t or t.isdigit() or '/KRW' in t or 'KS11' in t:
+                    ws.cell(r, 3).number_format = '"₩"#,##0.00'
+                else:
+                    ws.cell(r, 3).number_format = '"$"#,##0.00'
+                ws.cell(r, 4).number_format = '0.00"%"'
 
     async with bot:
         await bot.send_document(CHAT_ID, open(file_name, 'rb'), 
-                               caption=f"🌍 종합 리포트 ({now.strftime('%Y-%m-%d')})\n✅ 위안화 보강 및 전 항목 가운데 정렬 완료")
+                               caption=f"🌍 글로벌 종합 리포트 ({now.strftime('%Y-%m-%d')})\n✅ 전 항목 자동 수집 완료")
+    os.remove(file_name)
 
 if __name__ == "__main__":
-    asyncio.run(send_report())
+    asyncio.run(main())
