@@ -31,43 +31,53 @@ ASSET_NAMES = {
 
 async def fetch_asset_data(symbol, s_date):
     try:
-        # FinanceDataReader는 야후 서버를 찌르므로 간격을 약간 둡니다.
         df = fdr.DataReader(symbol, s_date)
         
-        # 위안화 등 예외 처리
+        # 위안화 등 특정 티커 예외 처리
         if (df is None or df.empty) and symbol == 'CNY/KRW':
             df = fdr.DataReader('CNYKRW=X', s_date)
             
-        if df is None or df.empty or len(df) < 2: return None
+        if df is None or df.empty: return None
+
+        # [핵심] 값이 없는 날짜(NaN)를 완전히 제거하여 '진짜 전 거래일'을 찾음
+        df = df.dropna(subset=['Close'])
+        if len(df) < 2: return None
         
-        last_c = float(df.iloc[-1]['Close'])
-        prev_c = float(df.iloc[-2]['Close'])
-        ratio = ((last_c - prev_c) / prev_c) * 100
+        # 마지막 두 데이터 추출
+        last_day = df.iloc[-1]
+        prev_day = df.iloc[-2]
+        
+        last_c = float(last_day['Close'])
+        prev_c = float(prev_day['Close'])
+        
+        # 등락률 계산
+        ratio = round(((last_c - prev_c) / prev_c) * 100, 2)
             
         return {'티커': symbol, '항목명': ASSET_NAMES.get(symbol, symbol), '현재가': last_c, '등락률': ratio}
-    except:
+    except Exception as e:
+        print(f"⚠️ {symbol} 오류: {e}")
         return None
 
 async def main():
     bot = Bot(token=TOKEN)
     now = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
-    s_date = (now - datetime.timedelta(days=7)).strftime('%Y-%m-%d')
+    # 주말/공휴일 대비 넉넉하게 최근 14일치 데이터 로드
+    s_date = (now - datetime.timedelta(days=14)).strftime('%Y-%m-%d')
 
-    print(f"📡 글로벌 종합 리포트 수집 중... (대상: {len(ASSET_NAMES)}종)")
+    print(f"📡 글로벌 종합 리포트 분석 중... (대상: {len(ASSET_NAMES)}종)")
     
-    # [차단 방지] 비동기로 한꺼번에 부르지 않고 0.2초 간격으로 조심조심 수집
     results = []
     for s in ASSET_NAMES.keys():
         res = await fetch_asset_data(s, s_date)
         if res: results.append(res)
-        await asyncio.sleep(0.2) 
+        await asyncio.sleep(0.15) # 야후 차단 방지용 딜레이
 
     df = pd.DataFrame(results)
     if df.empty:
-        print("❌ 수집된 데이터가 없습니다.")
+        print("❌ 수집 데이터 없음")
         return
 
-    # [엑셀 디자인]
+    # [엑셀 및 전송 로직] - 지수님 스타일 유지
     file_name = f"{now.strftime('%m%d')}_종합_리포트.xlsx"
     yellow_fill = PatternFill(start_color='FFFF00', end_color='FFFF00', fill_type='solid')
     header_fill = PatternFill(start_color='444444', end_color='444444', fill_type='solid')
@@ -77,39 +87,24 @@ async def main():
     with pd.ExcelWriter(file_name, engine='openpyxl') as writer:
         df.rename(columns={'등락률':'등락률(%)'}).to_excel(writer, sheet_name='현황', index=False)
         ws = writer.sheets['현황']
-        
-        ws.column_dimensions['A'].width = 15
-        ws.column_dimensions['B'].width = 25
-        ws.column_dimensions['C'].width = 20
-        ws.column_dimensions['D'].width = 15
-
         for r in range(1, ws.max_row + 1):
             for c in range(1, 5):
                 cell = ws.cell(r, c)
                 cell.alignment = Alignment(horizontal='center', vertical='center')
                 cell.border = border
-                
-                if r == 1: # 헤더
-                    cell.fill, cell.font = header_fill, white_font
-                else:
-                    # 3% 이상 강조
-                    ratio_val = abs(float(ws.cell(r, 4).value or 0))
-                    if ratio_val >= 3:
-                        cell.fill = yellow_fill
-                        cell.font = Font(bold=True)
-            
+                if r == 1: cell.fill, cell.font = header_fill, white_font
+                elif abs(float(ws.cell(r, 4).value or 0)) >= 3:
+                    cell.fill = yellow_fill
+                    cell.font = Font(bold=True)
             if r > 1:
-                # 숫자 포맷
                 t = str(ws.cell(r, 1).value)
-                if '-KRW' in t or t.isdigit() or '/KRW' in t or 'KS11' in t:
-                    ws.cell(r, 3).number_format = '"₩"#,##0.00'
-                else:
-                    ws.cell(r, 3).number_format = '"$"#,##0.00'
+                ws.cell(r, 3).number_format = '"₩"#,##0.00' if ('-KRW' in t or t.isdigit() or '/KRW' in t) else '"$"#,##0.00'
                 ws.cell(r, 4).number_format = '0.00"%"'
+        ws.column_dimensions['B'].width = 25
 
     async with bot:
         await bot.send_document(CHAT_ID, open(file_name, 'rb'), 
-                               caption=f"🌍 글로벌 종합 리포트 ({now.strftime('%Y-%m-%d')})\n✅ 전 항목 자동 수집 완료")
+                               caption=f"🌍 종합 리포트 ({now.strftime('%Y-%m-%d')})\n✅ 전일 대비 등락률 교정 완료")
     os.remove(file_name)
 
 if __name__ == "__main__":
