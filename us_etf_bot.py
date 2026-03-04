@@ -39,28 +39,23 @@ async def fetch_asset_data(symbol):
         elif symbol == 'CNY/KRW': yf_symbol = 'CNYKRW=X'
         elif symbol.isdigit(): yf_symbol = symbol + ".KS"
 
-        # period="2d"로 딱 어제와 오늘만 가져옴
         ticker_obj = yf.Ticker(yf_symbol)
         df = ticker_obj.history(period="5d")
         df = df.dropna(subset=['Close'])
         
         if len(df) < 2: return None
 
-        # 마지막 두 데이터 (가장 최근 거래일 2개)
         last_c = float(df['Close'].iloc[-1])
         prev_c = float(df['Close'].iloc[-2])
         
-        # [교정된 계산 방식]
-        change_ratio = ((last_c - prev_c) / prev_c) * 100
-        
-        # 비정상적인 등락률(90% 이상 폭락/폭등)은 데이터 오류로 보고 제외
-        if abs(change_ratio) > 90: return None
+        # 등락률 자리에 들어갈 '전일 대비 숫자(수치)'
+        diff_value = last_c - prev_c
             
         return {
             '티커': symbol, 
             '항목명': ASSET_NAMES.get(symbol, symbol), 
             '현재가': last_c, 
-            '등락률': change_ratio
+            '등락률%': diff_value # 이름은 등락률% 지만 수치값 전달
         }
     except: return None
 
@@ -74,8 +69,6 @@ async def main():
         if res: results.append(res)
         await asyncio.sleep(0.05)
 
-    if not results: return
-
     df = pd.DataFrame(results)
     file_name = f"{now.strftime('%m%d')}_종합_리포트.xlsx"
     
@@ -83,44 +76,39 @@ async def main():
         df.to_excel(writer, sheet_name='현황', index=False)
         ws = writer.sheets['현황']
         
-        # 스타일 설정
-        yellow_fill = PatternFill(start_color='FFFF00', end_color='FFFF00', fill_type='solid')
         header_fill = PatternFill(start_color='444444', end_color='444444', fill_type='solid')
         white_font = Font(color='FFFFFF', bold=True)
         border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
 
-        ws.column_dimensions['A'].width = 15
-        ws.column_dimensions['B'].width = 30
-        ws.column_dimensions['C'].width = 18
-        ws.column_dimensions['D'].width = 12
+        # 가독성을 위한 칸 너비 조절
+        ws.column_dimensions['A'].width = 15 # 티커
+        ws.column_dimensions['B'].width = 30 # 항목명
+        ws.column_dimensions['C'].width = 18 # 현재가
+        ws.column_dimensions['D'].width = 15 # 등락률% (수치)
 
         for r in range(1, ws.max_row + 1):
             for c in range(1, 5):
                 cell = ws.cell(r, c)
-                cell.alignment = Alignment(horizontal='center', vertical='center')
+                cell.alignment = Alignment(horizontal='center', vertical='center') # 중앙 정렬
                 cell.border = border
                 if r == 1: cell.fill, cell.font = header_fill, white_font
                 
             if r > 1:
                 ticker = str(ws.cell(r, 1).value)
-                ratio_val = float(ws.cell(r, 4).value or 0)
-                
-                # [서식] 소수점 0이면 정수 표시 서식 (0.## 사용)
-                # 현재가 서식
+                # 화폐 기호 결정
                 is_won = any(x in ticker for x in ['-KRW', '/KRW', 'KS11', 'KQ11']) or ticker.replace('.KS','').isdigit()
-                curr_fmt = '"₩"#,##0.##' if is_won else '"$"#,##0.##'
-                ws.cell(r, 3).number_format = curr_fmt
+                unit = '₩' if is_won else '$'
                 
-                # 등락률 서식 (소수점이 0이면 버림)
-                ws.cell(r, 4).number_format = '0.##"%"'
+                # [현재가] 화폐 표시 + 소수점 0이면 제거
+                ws.cell(r, 3).number_format = f'"{unit}"#,##0.##'
                 
-                # ±5% 이상 강조
-                if abs(ratio_val) >= 5:
-                    for c in range(1, 5): ws.cell(r, c).fill = yellow_fill
+                # [등락률%] 전일 대비 숫자만 표시 (양수 빨강, 음수 파랑 서식)
+                # 소수점 0이면 제거하는 서식 적용
+                ws.cell(r, 4).number_format = '#,##0.##;[Red]-#,##0.##;0'
 
     async with bot:
         await bot.send_document(CHAT_ID, open(file_name, 'rb'), 
-                               caption=f"🌍 종합 리포트 ({now.strftime('%Y-%m-%d')})\n✅ 등락률 계산 로직 전면 재교정 완료")
+                               caption=f"🌍 종합 리포트 ({now.strftime('%Y-%m-%d')})\n✅ 현재가(단위표기) & 등락률(전일대비 수치) 적용 완료")
     if os.path.exists(file_name): os.remove(file_name)
 
 if __name__ == "__main__":
