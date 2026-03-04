@@ -31,7 +31,7 @@ async def main():
     df = pd.DataFrame()
     analysis_info = ""
 
-    # 1. 데이터 수집 (어제/지난주 데이터 탐색)
+    # 1. 데이터 수집 및 정제 (어제/지난주 데이터 탐색)
     if day_of_week == 0: 
         mode_name = "주간평균리포트"
         weekly_dfs = []
@@ -44,11 +44,12 @@ async def main():
                 weekly_dfs.append(df_day)
         if weekly_dfs:
             full_df = pd.concat(weekly_dfs)
-            df = full_df.groupby(['itmsNm', 'mrktCtg', 'srtnCd']).agg({
+            # 순서 정렬을 위한 가공 (시장 제외)
+            df = full_df.groupby(['itmsNm', 'srtnCd', 'mrktCtg']).agg({
                 'mkp': 'first', 'clpr': 'last', 'lopr': 'min', 'hipr': 'max', 'fltRt': 'mean', 'trqu': 'mean'
             }).reset_index()
-            df.columns = ['종목명', '시장', '종목코드', '시가', '종가', '저가', '고가', '등락률(%)', '거래량']
-            analysis_info = f"지난주 평균 ({(now - datetime.timedelta(days=7)).strftime('%m%d')}~{(now - datetime.timedelta(days=3)).strftime('%m%d')})"
+            # 컬럼명 및 순서 재배치 (시장 정보는 필터용으로만 보관 후 삭제)
+            df.columns = ['종목명', '종목코드', '시장', '시가', '종가', '저가', '고가', '등락률(%)', '거래량']
     else:
         mode_name = "일일마감리포트"
         for i in range(1, 8):
@@ -56,22 +57,24 @@ async def main():
             raw = get_official_data(search_date)
             if not raw.empty:
                 df = pd.DataFrame()
-                df['종목명'] = raw['itmsNm'] # A열: 종목명 (강조 대상)
-                df['시장'] = raw['mrktCtg']
                 df['종목코드'] = raw['srtnCd']
-                df['시가'] = pd.to_numeric(raw['mkp']).fillna(0)
-                df['종가'] = pd.to_numeric(raw['clpr']).fillna(0)
-                df['저가'] = pd.to_numeric(raw['lopr']).fillna(0)
-                df['고가'] = pd.to_numeric(raw['hipr']).fillna(0)
-                df['등락률(%)'] = pd.to_numeric(raw['fltRt']).fillna(0)
-                df['거래량'] = pd.to_numeric(raw['trqu']).fillna(0) # I열: 거래량
+                df['종목명'] = raw['itmsNm']
+                df['시가'] = pd.to_numeric(raw['mkp']).fillna(0).astype(int)
+                df['종가'] = pd.to_numeric(raw['clpr']).fillna(0).astype(int)
+                df['저가'] = pd.to_numeric(raw['lopr']).fillna(0).astype(int)
+                df['고가'] = pd.to_numeric(raw['hipr']).fillna(0).astype(int)
+                df['등락률(%)'] = pd.to_numeric(raw['fltRt']).fillna(0).astype(float)
+                df['거래량'] = pd.to_numeric(raw['trqu']).fillna(0).astype(int)
+                df['시장'] = raw['mrktCtg'] # 시트 분류용 (표시는 안함)
                 analysis_info = f"마감 기준일: {search_date}"
                 break
             time.sleep(0.1)
 
     if df.empty: return
 
-    # 2. 엑셀 생성
+    # 요청하신 컬럼 순서 재배치: 종목코드 -> 종목명 -> 시가 -> 종가 -> 저가 -> 고가 -> 등락률 -> 거래량
+    target_cols = ['종목코드', '종목명', '시가', '종가', '저가', '고가', '등락률(%)', '거래량']
+    
     file_name = f"{now.strftime('%m%d')}_{mode_name}.xlsx"
     
     # 스타일 정의
@@ -89,38 +92,42 @@ async def main():
         for market in ['KOSPI', 'KOSDAQ']:
             for is_up in [True, False]:
                 sheet_label = f"{market}_{'상승' if is_up else '하락'}"
+                # 시장 데이터 필터링 후 지정된 컬럼만 추출
                 m_cond = df['시장'].str.contains(market)
                 r_cond = (df['등락률(%)'] >= 5) if is_up else (df['등락률(%)'] <= -5)
                 sub_df = df[m_cond & r_cond].copy().sort_values('등락률(%)', ascending=not is_up)
+                sub_df = sub_df[target_cols] # 시장 컬럼 제거 및 순서 재배치
                 
                 sub_df.to_excel(writer, sheet_name=sheet_label, index=False)
                 ws = writer.sheets[sheet_label]
 
                 # [디자인 강제 적용]
-                # 1. 열 너비 설정 (A: 종목명 30, I: 거래량 25)
-                ws.column_dimensions['A'].width = 30
-                ws.column_dimensions['B'].width = 12
-                ws.column_dimensions['C'].width = 12
-                for col in ['D','E','F','G']: ws.column_dimensions[col].width = 15
-                ws.column_dimensions['H'].width = 12
-                ws.column_dimensions['I'].width = 25 # 거래량 25 고정
+                # 열 너비 설정 (B: 종목명 30, H: 거래량 20)
+                ws.column_dimensions['A'].width = 12 # 종목코드
+                ws.column_dimensions['B'].width = 30 # 종목명 (강조 대상)
+                ws.column_dimensions['C'].width = 15 # 시가
+                ws.column_dimensions['D'].width = 15 # 종가
+                ws.column_dimensions['E'].width = 15 # 저가
+                ws.column_dimensions['F'].width = 15 # 고가
+                ws.column_dimensions['G'].width = 12 # 등락률
+                ws.column_dimensions['H'].width = 20 # 거래량 (요청: 20)
 
-                # 2. 셀 전체 순회하며 스타일 입히기
-                for r_idx, row in enumerate(ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=9), 1):
+                # 셀 전체 스타일링
+                for r_idx, row in enumerate(ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=8), 1):
                     for c_idx, cell in enumerate(row, 1):
                         cell.border = border
                         cell.alignment = center_align
                         
-                        if r_idx == 1: # 헤더 스타일
+                        if r_idx == 1: # 헤더
                             cell.fill = header_fill
                             cell.font = font_white_bold
-                        else: # 데이터 영역
-                            # 천 단위 콤마
-                            if c_idx in [4, 5, 6, 7, 9]: cell.number_format = '#,##0'
-                            if c_idx == 8: # 등락률 소수점
+                        else:
+                            # 숫자 포맷 (시/종/저/고/거래량)
+                            if c_idx in [3, 4, 5, 6, 8]: cell.number_format = '#,##0'
+                            if c_idx == 7: # 등락률 기준 B열(종목명) 색칠
                                 cell.number_format = '0.00'
                                 val = abs(float(cell.value or 0))
-                                name_cell = ws.cell(row=r_idx, column=1) # A열(종목명) 색칠
+                                name_cell = ws.cell(row=r_idx, column=2) # B열(종목명)
                                 if val >= 25: 
                                     name_cell.fill, name_cell.font = colors['red'], font_white_bold
                                 elif val >= 20: 
