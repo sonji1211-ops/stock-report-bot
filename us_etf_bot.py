@@ -1,6 +1,5 @@
-import os, pandas as pd, asyncio, datetime, time
+import os, pandas as pd, asyncio, datetime
 import yfinance as yf
-import FinanceDataReader as fdr
 from telegram import Bot
 from openpyxl.styles import Alignment, PatternFill, Font, Border, Side
 
@@ -29,9 +28,9 @@ ASSET_NAMES = {
     'GC=F': '금 선물', 'SI=F': '은 선물'
 }
 
-async def fetch_asset_data(symbol, s_date):
+async def fetch_asset_data(symbol):
     try:
-        # 티커 변환 (야후 파이낸스 기준)
+        # 야후 티커 변환
         yf_symbol = symbol
         if symbol == 'KS11': yf_symbol = '^KS11'
         elif symbol == 'KQ11': yf_symbol = '^KQ11'
@@ -39,68 +38,54 @@ async def fetch_asset_data(symbol, s_date):
         elif symbol == 'JPY/KRW': yf_symbol = 'JPYKRW=X'
         elif symbol == 'EUR/KRW': yf_symbol = 'EURKRW=X'
         elif symbol == 'CNY/KRW': yf_symbol = 'CNYKRW=X'
-        elif symbol.isdigit(): yf_symbol = symbol + ".KS" # 국내 ETF
-        
-        # 데이터 호출
-        df = yf.download(yf_symbol, start=s_date, progress=False)
-        
-        if df is None or df.empty:
-            # 야후 실패 시 FDR로 백업 (마지막 시도)
-            df = fdr.DataReader(symbol, s_date)
+        elif symbol.isdigit(): yf_symbol = symbol + ".KS"
 
-        df = df.dropna(subset=['Close'])
-        if len(df) < 2: return None
-        
+        # 최근 7일치 데이터를 가져옴 (충분히)
+        ticker_obj = yf.Ticker(yf_symbol)
+        df = ticker_obj.history(period="7d")
+
+        if df.empty or len(df) < 2:
+            print(f"⚠️ {symbol} 데이터 부족")
+            return None
+
+        # 정확한 종가 추출 (최신 yf는 단일 종목의 경우 바로 접근 가능)
         last_c = float(df['Close'].iloc[-1])
         prev_c = float(df['Close'].iloc[-2])
         ratio = round(((last_c - prev_c) / prev_c) * 100, 2)
             
+        print(f"✅ {symbol} 완료: {last_c} ({ratio}%)")
         return {'티커': symbol, '항목명': ASSET_NAMES.get(symbol, symbol), '현재가': last_c, '등락률': ratio}
-    except:
+    except Exception as e:
+        print(f"❌ {symbol} 오류: {e}")
         return None
 
 async def main():
     bot = Bot(token=TOKEN)
     now = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
-    s_date = (now - datetime.timedelta(days=14)).strftime('%Y-%m-%d')
-
-    print(f"📡 야후 파이낸스 기반 종합 리포트 분석 중...")
     
+    print(f"📡 분석 시작...")
     results = []
     for s in ASSET_NAMES.keys():
-        res = await fetch_asset_data(s, s_date)
+        res = await fetch_asset_data(s)
         if res: results.append(res)
-        await asyncio.sleep(0.05) # 간격 최소화
+        await asyncio.sleep(0.1) # 속도 조절
+
+    if not results:
+        print("🚨 수집된 데이터가 하나도 없습니다!")
+        return
 
     df = pd.DataFrame(results)
     file_name = f"{now.strftime('%m%d')}_종합_리포트.xlsx"
     
-    with pd.ExcelWriter(file_name, engine='openpyxl') as writer:
-        df.rename(columns={'등락률':'등락률(%)'}).to_excel(writer, sheet_name='현황', index=False)
-        ws = writer.sheets['현황']
-        
-        # [스타일 및 포맷 로직]
-        for r in range(1, ws.max_row + 1):
-            for c in range(1, 5):
-                ws.cell(r, c).alignment = Alignment(horizontal='center')
-                ws.cell(r, c).border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
-            
-            if r > 1:
-                t = str(ws.cell(r, 1).value)
-                # 원화/달러 기호 구분
-                if any(x in t for x in ['-KRW', '/KRW', 'KS11', 'KQ11']) or t.replace('.KS','').isdigit():
-                    ws.cell(r, 3).number_format = '"₩"#,##0.00'
-                else:
-                    ws.cell(r, 3).number_format = '"$"#,##0.00'
-                ws.cell(r, 4).number_format = '0.00"%"'
-
-        ws.column_dimensions['B'].width = 25
-        ws.column_dimensions['C'].width = 18
-
+    # 엑셀 저장
+    df.to_excel(file_name, index=False)
+    
+    # 텔레그램 전송
     async with bot:
-        await bot.send_document(CHAT_ID, open(file_name, 'rb'), 
-                               caption=f"🌍 종합 리포트 ({now.strftime('%Y-%m-%d')})\n✅ 오류 수정 및 통화 단위 구분 완료")
-    os.remove(file_name)
+        with open(file_name, 'rb') as f:
+            await bot.send_document(CHAT_ID, f, caption=f"🌍 종합 리포트 ({now.strftime('%Y-%m-%d')})\n✅ 데이터 수집 완료")
+    
+    if os.path.exists(file_name): os.remove(file_name)
 
 if __name__ == "__main__":
     asyncio.run(main())
