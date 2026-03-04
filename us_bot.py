@@ -3,22 +3,24 @@ from telegram import Bot
 from openpyxl.styles import Alignment, PatternFill, Font, Border, Side
 import FinanceDataReader as fdr
 
-# [1. 설정]
+# [1. 설정 정보]
 TOKEN = "8574978661:AAF5SXIgfpJlnAfN5ccSk0tJek_uSlCMBBo"
 CHAT_ID = "8564327930"
 
-# [2. 한글 매핑] (기존 리스트 유지)
+# [2. 주요 종목 한글 매핑]
 KR_NAMES = {
     'AAPL': '애플', 'MSFT': '마이크로소프트', 'NVDA': '엔비디아', 'TSLA': '테슬라', 
     'AMZN': '아마존', 'META': '메타', 'GOOGL': '알파벳A', 'AVGO': '브로드컴',
-    'NFLX': '넷플릭스', 'AMD': 'AMD', 'MU': '마이크론', 'QCOM': '퀄컴'
+    'NFLX': '넷플릭스', 'AMD': 'AMD', 'MU': '마이크론', 'QCOM': '퀄컴',
+    'ORCL': '오라클', 'COST': '코스트코', 'ADBE': '어도비', 'INTC': '인텔',
+    'BRK-B': '버크셔헤서웨이', 'V': '비자', 'MA': '마스터카드', 'JPM': 'JP모건'
 }
 
 async def fetch_stock_safe(row, start_dt, end_dt):
-    """개별 종목 수집 (차단 방지용 에러 처리)"""
+    """차단 방지를 위한 개별 종목 수집 (오류 시 무시)"""
     symbol = row['Symbol']
     try:
-        # yfinance 차단 대비 넉넉한 기간 조회
+        # 데이터 수집
         df = fdr.DataReader(symbol, start_dt, end_dt)
         if df.empty or len(df) < 2: return None
         
@@ -41,30 +43,37 @@ async def main():
     bot = Bot(token=TOKEN)
     now = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
     
-    print("📡 나스닥 시총 상위 500개 리스트 수집 중...")
+    print("📡 미국 시장(NASDAQ+NYSE) 상위 1,000개 리스트 구성 중...")
     try:
-        df_base = fdr.StockListing('NASDAQ')
-        df_target = df_base.head(500) # 지수님 요청대로 500개 설정
+        # 1. 미국 전체 시장 상위 종목 수집 (중복 제거 및 상위 1,000개)
+        df_nasdaq = fdr.StockListing('NASDAQ')
+        df_nyse = fdr.StockListing('NYSE')
+        df_base = pd.concat([df_nasdaq, df_nyse]).drop_duplicates('Symbol')
+        df_target = df_base.head(1000) # 시총 상위 1,000개
         
         start_dt = (now - datetime.timedelta(days=10)).strftime('%Y-%m-%d')
         end_dt = now.strftime('%Y-%m-%d')
         
         results = []
-        chunk_size = 20 # 20개씩 끊어서 요청 (안전장치)
+        chunk_size = 20 # 20개씩 끊어서 요청
         
+        print(f"🚀 분석 시작 (총 {len(df_target)}개 종목)... 약 10분 소요 예정")
         for i in range(0, len(df_target), chunk_size):
             chunk = df_target.iloc[i:i+chunk_size]
-            print(f"🚀 분석 중: {i} ~ {i+chunk_size}개째...")
             tasks = [fetch_stock_safe(row, start_dt, end_dt) for _, row in chunk.iterrows()]
             chunk_results = await asyncio.gather(*tasks)
             results.extend([r for r in chunk_results if r is not None])
-            await asyncio.sleep(1.5) # 차단 방지를 위한 휴식 시간 (필수)
+            
+            # 진행상황 출력 및 휴식 (중요!)
+            print(f"⏳ 진행 중: {min(i+chunk_size, len(df_target))}/{len(df_target)} 완료")
+            await asyncio.sleep(2.0) # 1,000개 수집 시 차단 방지를 위해 2초 휴식
 
         df_final = pd.DataFrame(results)
         if df_final.empty: return
 
-        # 3. 엑셀 생성 및 디자인 (국장과 통일)
-        file_name = f"{now.strftime('%m%d')}_미국장_500_리포트.xlsx"
+        # 2. 엑셀 파일 생성
+        file_name = f"{now.strftime('%m%d')}_미국장_1000_리포트.xlsx"
+        target_cols = ['티커', '종목명', '종가', '등락률(%)', '산업', '기준일']
         
         h_fill = PatternFill(start_color="444444", end_color="444444", fill_type="solid")
         f_white = Font(color="FFFFFF", bold=True)
@@ -79,19 +88,21 @@ async def main():
             for trend in ['상승', '하락']:
                 cond = (df_final['등락률(%)'] >= 5) if trend == '상승' else (df_final['등락률(%)'] <= -5)
                 sub = df_final[cond].copy().sort_values('등락률(%)', ascending=(trend == '하락'))
+                sub = sub[target_cols]
                 
-                sheet_name = f"나스닥_{trend}"
+                sheet_name = f"미국_{trend}"
                 sub.to_excel(writer, sheet_name=sheet_name, index=False)
                 ws = writer.sheets[sheet_name]
 
-                # 열 너비 설정
+                # [너비 설정] 종목명 30 고정
                 ws.column_dimensions['A'].width = 12 # 티커
-                ws.column_dimensions['B'].width = 30 # 종목명 (강조)
+                ws.column_dimensions['B'].width = 30 # 종목명
                 ws.column_dimensions['C'].width = 15 # 종가
                 ws.column_dimensions['D'].width = 15 # 등락률
                 ws.column_dimensions['E'].width = 40 # 산업
                 ws.column_dimensions['F'].width = 15 # 기준일
 
+                # [스타일링]
                 for r_idx, row in enumerate(ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=6), 1):
                     for c_idx, cell in enumerate(row, 1):
                         cell.alignment = Alignment(horizontal='center', vertical='center')
@@ -100,7 +111,7 @@ async def main():
                             cell.fill, cell.font = h_fill, f_white
                         else:
                             if c_idx == 3: cell.number_format = '#,##0.00'
-                            if c_idx == 4: # 등락률 소수점 및 종목명(B열) 색상
+                            if c_idx == 4: # 등락률 소수점 및 B열 종목명 색상 강조
                                 cell.number_format = '0.00'
                                 rv = abs(float(cell.value or 0))
                                 name_cell = ws.cell(row=r_idx, column=2)
@@ -108,19 +119,19 @@ async def main():
                                 elif rv >= 20: name_cell.fill = colors['orange']
                                 elif rv >= 10: name_cell.fill = colors['yellow']
 
-        # 4. 텔레그램 전송
+        # 3. 텔레그램 전송
         up_count = len(df_final[df_final['등락률(%)'] >= 5])
         down_count = len(df_final[df_final['등락률(%)'] <= -5])
         
         async with bot:
-            msg = (f"🇺🇸 나스닥 시총상위 500 분석\n"
+            msg = (f"🇺🇸 미국 시장(NASDAQ/NYSE) 상위 1000\n"
                    f"📈 상승(5%↑): {up_count}개\n"
                    f"📉 하락(5%↓): {down_count}개\n"
-                   f"💡 20개씩 분할 수집으로 차단 회피 성공")
+                   f"💡 1,000개 전수 조사 완료 (B열 색상 강조)")
             await bot.send_document(CHAT_ID, open(file_name, 'rb'), caption=msg)
         
         if os.path.exists(file_name): os.remove(file_name)
-        print("✅ 미국장 리포트 발송 완료!")
+        print("✅ 미국장 1,000개 리포트 전송 성공!")
 
     except Exception as e:
         print(f"🚨 오류: {e}")
