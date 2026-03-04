@@ -30,7 +30,6 @@ ASSET_NAMES = {
 
 async def fetch_asset_data(symbol):
     try:
-        # 야후 티커 변환
         yf_symbol = symbol
         if symbol == 'KS11': yf_symbol = '^KS11'
         elif symbol == 'KQ11': yf_symbol = '^KQ11'
@@ -40,51 +39,83 @@ async def fetch_asset_data(symbol):
         elif symbol == 'CNY/KRW': yf_symbol = 'CNYKRW=X'
         elif symbol.isdigit(): yf_symbol = symbol + ".KS"
 
-        # 최근 7일치 데이터를 가져옴 (충분히)
         ticker_obj = yf.Ticker(yf_symbol)
         df = ticker_obj.history(period="7d")
 
-        if df.empty or len(df) < 2:
-            print(f"⚠️ {symbol} 데이터 부족")
-            return None
+        if df.empty or len(df) < 2: return None
 
-        # 정확한 종가 추출 (최신 yf는 단일 종목의 경우 바로 접근 가능)
         last_c = float(df['Close'].iloc[-1])
         prev_c = float(df['Close'].iloc[-2])
         ratio = round(((last_c - prev_c) / prev_c) * 100, 2)
             
-        print(f"✅ {symbol} 완료: {last_c} ({ratio}%)")
         return {'티커': symbol, '항목명': ASSET_NAMES.get(symbol, symbol), '현재가': last_c, '등락률': ratio}
-    except Exception as e:
-        print(f"❌ {symbol} 오류: {e}")
-        return None
+    except: return None
 
 async def main():
     bot = Bot(token=TOKEN)
     now = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
     
-    print(f"📡 분석 시작...")
+    print(f"📡 데이터 수집 및 디자인 적용 중...")
     results = []
     for s in ASSET_NAMES.keys():
         res = await fetch_asset_data(s)
         if res: results.append(res)
-        await asyncio.sleep(0.1) # 속도 조절
+        await asyncio.sleep(0.05)
 
-    if not results:
-        print("🚨 수집된 데이터가 하나도 없습니다!")
-        return
+    if not results: return
 
     df = pd.DataFrame(results)
     file_name = f"{now.strftime('%m%d')}_종합_리포트.xlsx"
     
-    # 엑셀 저장
-    df.to_excel(file_name, index=False)
-    
-    # 텔레그램 전송
+    # [디자인 적용]
+    with pd.ExcelWriter(file_name, engine='openpyxl') as writer:
+        df.rename(columns={'등락률':'등락률(%)'}).to_excel(writer, sheet_name='현황', index=False)
+        ws = writer.sheets['현황']
+        
+        # 스타일 정의
+        yellow_fill = PatternFill(start_color='FFFF00', end_color='FFFF00', fill_type='solid')
+        header_fill = PatternFill(start_color='444444', end_color='444444', fill_type='solid')
+        white_font = Font(color='FFFFFF', bold=True)
+        border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
+        align_center = Alignment(horizontal='center', vertical='center')
+
+        # 열 너비 설정 (항목명 칸 넉넉하게)
+        ws.column_dimensions['A'].width = 15
+        ws.column_dimensions['B'].width = 30 # 항목명
+        ws.column_dimensions['C'].width = 18 # 현재가
+        ws.column_dimensions['D'].width = 12 # 등락률
+
+        for r in range(1, ws.max_row + 1):
+            for c in range(1, 5):
+                cell = ws.cell(r, c)
+                cell.alignment = align_center # [1] 전체 가운데 정렬
+                cell.border = border
+                
+                if r == 1: # 헤더 디자인
+                    cell.fill, cell.font = header_fill, white_font
+                
+            if r > 1:
+                ticker = str(ws.cell(r, 1).value)
+                ratio_val = float(ws.cell(r, 4).value or 0)
+                
+                # [2] 현재가 화폐 단위 표시
+                is_won = any(x in ticker for x in ['-KRW', '/KRW', 'KS11', 'KQ11']) or ticker.replace('.KS','').isdigit()
+                if is_won:
+                    ws.cell(r, 3).number_format = '"₩"#,##0.00'
+                else:
+                    ws.cell(r, 3).number_format = '"$"#,##0.00'
+                
+                # [3] 등락률 숫자 뒤 % 표시
+                ws.cell(r, 4).number_format = '0.00"%"'
+                
+                # [4] +-5% 이상 노란색 배경색
+                if abs(ratio_val) >= 5:
+                    for c in range(1, 5):
+                        ws.cell(r, c).fill = yellow_fill
+
     async with bot:
-        with open(file_name, 'rb') as f:
-            await bot.send_document(CHAT_ID, f, caption=f"🌍 종합 리포트 ({now.strftime('%Y-%m-%d')})\n✅ 데이터 수집 완료")
-    
+        await bot.send_document(CHAT_ID, open(file_name, 'rb'), 
+                               caption=f"🌍 종합 리포트 ({now.strftime('%Y-%m-%d')})\n✅ 가독성 최적화 및 5% 변동 강조 완료")
     if os.path.exists(file_name): os.remove(file_name)
 
 if __name__ == "__main__":
