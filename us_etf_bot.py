@@ -47,15 +47,13 @@ async def fetch_asset_data(symbol):
 
         last_c = float(df['Close'].iloc[-1])
         prev_c = float(df['Close'].iloc[-2])
-        
-        # 등락률 자리에 들어갈 '전일 대비 숫자(수치)'
         diff_value = last_c - prev_c
             
         return {
             '티커': symbol, 
             '항목명': ASSET_NAMES.get(symbol, symbol), 
             '현재가': last_c, 
-            '등락률%': diff_value # 이름은 등락률% 지만 수치값 전달
+            '전일대비': diff_value
         }
     except: return None
 
@@ -76,39 +74,52 @@ async def main():
         df.to_excel(writer, sheet_name='현황', index=False)
         ws = writer.sheets['현황']
         
+        # 스타일 정의
         header_fill = PatternFill(start_color='444444', end_color='444444', fill_type='solid')
         white_font = Font(color='FFFFFF', bold=True)
+        # 강조 색상 (빨강: 상승, 파랑: 하락)
+        red_fill = PatternFill(start_color='FFCCCC', end_color='FFCCCC', fill_type='solid') # 연한 빨강
+        blue_fill = PatternFill(start_color='CCE5FF', end_color='CCE5FF', fill_type='solid') # 연한 파랑
         border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
 
-        # 가독성을 위한 칸 너비 조절
-        ws.column_dimensions['A'].width = 15 # 티커
-        ws.column_dimensions['B'].width = 30 # 항목명
-        ws.column_dimensions['C'].width = 18 # 현재가
-        ws.column_dimensions['D'].width = 15 # 등락률% (수치)
+        # 너비 조절
+        ws.column_dimensions['A'].width = 15
+        ws.column_dimensions['B'].width = 30 # 항목명 30
+        ws.column_dimensions['C'].width = 18
+        ws.column_dimensions['D'].width = 15 # 전일대비
 
         for r in range(1, ws.max_row + 1):
             for c in range(1, 5):
                 cell = ws.cell(r, c)
-                cell.alignment = Alignment(horizontal='center', vertical='center') # 중앙 정렬
+                cell.alignment = Alignment(horizontal='center', vertical='center')
                 cell.border = border
-                if r == 1: cell.fill, cell.font = header_fill, white_font
+                if r == 1: 
+                    cell.fill, cell.font = header_fill, white_font
                 
             if r > 1:
                 ticker = str(ws.cell(r, 1).value)
+                diff_val = float(ws.cell(r, 4).value or 0)
+                name_cell = ws.cell(r, 2) # 항목명 셀
+                
+                # [디자인] 전일대비 수치에 따라 항목명 색칠
+                if diff_val > 0:
+                    name_cell.fill = red_fill
+                elif diff_val < 0:
+                    name_cell.fill = blue_fill
+
                 # 화폐 기호 결정
                 is_won = any(x in ticker for x in ['-KRW', '/KRW', 'KS11', 'KQ11']) or ticker.replace('.KS','').isdigit()
                 unit = '₩' if is_won else '$'
                 
-                # [현재가] 화폐 표시 + 소수점 0이면 제거
+                # 현재가 포맷
                 ws.cell(r, 3).number_format = f'"{unit}"#,##0.##'
                 
-                # [등락률%] 전일 대비 숫자만 표시 (양수 빨강, 음수 파랑 서식)
-                # 소수점 0이면 제거하는 서식 적용
+                # 전일대비 포맷 (양수 빨강, 음수 파랑 텍스트)
                 ws.cell(r, 4).number_format = '#,##0.##;[Red]-#,##0.##;0'
 
     async with bot:
         await bot.send_document(CHAT_ID, open(file_name, 'rb'), 
-                               caption=f"🌍 종합 리포트 ({now.strftime('%Y-%m-%d')})\n✅ 현재가(단위표기) & 등락률(전일대비 수치) 적용 완료")
+                               caption=f"🌍 종합 리포트 ({now.strftime('%Y-%m-%d')})\n📊 항목명 배경색 강조 (상승:빨강 / 하락:파랑) 적용")
     if os.path.exists(file_name): os.remove(file_name)
 
 if __name__ == "__main__":
