@@ -47,13 +47,16 @@ async def fetch_asset_data(symbol):
 
         last_c = float(df['Close'].iloc[-1])
         prev_c = float(df['Close'].iloc[-2])
+        
+        ratio = round(((last_c - prev_c) / prev_c) * 100, 2)
         diff_value = last_c - prev_c
             
         return {
             '티커': symbol, 
             '항목명': ASSET_NAMES.get(symbol, symbol), 
             '현재가': last_c, 
-            '전일대비': diff_value
+            '전일대비': diff_value,
+            '등락률': ratio
         }
     except: return None
 
@@ -71,55 +74,53 @@ async def main():
     file_name = f"{now.strftime('%m%d')}_종합_리포트.xlsx"
     
     with pd.ExcelWriter(file_name, engine='openpyxl') as writer:
-        df.to_excel(writer, sheet_name='현황', index=False)
+        df[['티커', '항목명', '현재가', '전일대비']].to_excel(writer, sheet_name='현황', index=False)
         ws = writer.sheets['현황']
         
-        # 스타일 정의
-        header_fill = PatternFill(start_color='444444', end_color='444444', fill_type='solid')
-        white_font = Font(color='FFFFFF', bold=True)
-        # 강조 색상 (빨강: 상승, 파랑: 하락)
-        red_fill = PatternFill(start_color='FFCCCC', end_color='FFCCCC', fill_type='solid') # 연한 빨강
-        blue_fill = PatternFill(start_color='CCE5FF', end_color='CCE5FF', fill_type='solid') # 연한 파랑
+        h_fill = PatternFill(start_color="444444", end_color="444444", fill_type="solid")
+        f_white = Font(color="FFFFFF", bold=True)
+        # ETF 최적화 색상
+        colors = {
+            'red': PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid"),   # 10%↑
+            'orange': PatternFill(start_color="FFCC00", end_color="FFCC00", fill_type="solid"),# 5%↑
+            'yellow': PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid") # 3%↑
+        }
         border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
 
-        # 너비 조절
         ws.column_dimensions['A'].width = 15
-        ws.column_dimensions['B'].width = 30 # 항목명 30
+        ws.column_dimensions['B'].width = 30
         ws.column_dimensions['C'].width = 18
-        ws.column_dimensions['D'].width = 15 # 전일대비
+        ws.column_dimensions['D'].width = 15
 
-        for r in range(1, ws.max_row + 1):
-            for c in range(1, 5):
-                cell = ws.cell(r, c)
+        for r_idx, row in enumerate(ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=4), 1):
+            for c_idx, cell in enumerate(row, 1):
                 cell.alignment = Alignment(horizontal='center', vertical='center')
                 cell.border = border
-                if r == 1: 
-                    cell.fill, cell.font = header_fill, white_font
+                if r_idx == 1:
+                    cell.fill, cell.font = h_fill, f_white
                 
-            if r > 1:
-                ticker = str(ws.cell(r, 1).value)
-                diff_val = float(ws.cell(r, 4).value or 0)
-                name_cell = ws.cell(r, 2) # 항목명 셀
+            if r_idx > 1:
+                ratio_val = df.iloc[r_idx-2]['등락률']
+                abs_ratio = abs(ratio_val)
+                name_cell = ws.cell(row=r_idx, column=2)
                 
-                # [디자인] 전일대비 수치에 따라 항목명 색칠
-                if diff_val > 0:
-                    name_cell.fill = red_fill
-                elif diff_val < 0:
-                    name_cell.fill = blue_fill
+                # [ETF 전용 기준 변경] 3% / 5% / 10%
+                if abs_ratio >= 10: 
+                    name_cell.fill, name_cell.font = colors['red'], f_white
+                elif abs_ratio >= 5: 
+                    name_cell.fill = colors['orange']
+                elif abs_ratio >= 3: 
+                    name_cell.fill = colors['yellow']
 
-                # 화폐 기호 결정
+                ticker = str(ws.cell(r_idx, 1).value)
                 is_won = any(x in ticker for x in ['-KRW', '/KRW', 'KS11', 'KQ11']) or ticker.replace('.KS','').isdigit()
                 unit = '₩' if is_won else '$'
-                
-                # 현재가 포맷
-                ws.cell(r, 3).number_format = f'"{unit}"#,##0.##'
-                
-                # 전일대비 포맷 (양수 빨강, 음수 파랑 텍스트)
-                ws.cell(r, 4).number_format = '#,##0.##;[Red]-#,##0.##;0'
+                ws.cell(r_idx, 3).number_format = f'"{unit}"#,##0.##'
+                ws.cell(r_idx, 4).number_format = '#,##0.##;[Red]-#,##0.##;0'
 
     async with bot:
         await bot.send_document(CHAT_ID, open(file_name, 'rb'), 
-                               caption=f"🌍 종합 리포트 ({now.strftime('%Y-%m-%d')})\n📊 항목명 배경색 강조 (상승:빨강 / 하락:파랑) 적용")
+                               caption=f"🌍 종합 리포트 ({now.strftime('%Y-%m-%d')})\n✅ ETF 맞춤형 강조 (3%🟡 5%🟠 10%🔴) 적용")
     if os.path.exists(file_name): os.remove(file_name)
 
 if __name__ == "__main__":
