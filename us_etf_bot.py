@@ -6,7 +6,7 @@ from openpyxl.styles import Alignment, PatternFill, Font, Border, Side
 TOKEN = "8574978661:AAF5SXIgfpJlnAfN5ccSk0tJek_uSlCMBBo"
 CHAT_ID = "8564327930"
 
-# [전종목 리스트 그대로 유지]
+# [전종목 리스트]
 ASSET_NAMES = {
     'KS11': '코스피 지수', 'KQ11': '코스닥 지수', 
     'USD/KRW': '달러/원 환율', 'JPY/KRW': '엔/원 환율', 
@@ -28,11 +28,6 @@ ASSET_NAMES = {
     'GC=F': '금 선물', 'SI=F': '은 선물'
 }
 
-def format_num(val):
-    """소수점 아래가 0이면 정수로, 아니면 소수점 2자리까지 표시"""
-    if val == int(val): return int(val)
-    return round(val, 2)
-
 async def fetch_asset_data(symbol):
     try:
         yf_symbol = symbol
@@ -44,26 +39,35 @@ async def fetch_asset_data(symbol):
         elif symbol == 'CNY/KRW': yf_symbol = 'CNYKRW=X'
         elif symbol.isdigit(): yf_symbol = symbol + ".KS"
 
+        # period="2d"로 딱 어제와 오늘만 가져옴
         ticker_obj = yf.Ticker(yf_symbol)
-        df = ticker_obj.history(period="7d")
-        
-        # 실제 값이 있는 데이터만 남기기
+        df = ticker_obj.history(period="5d")
         df = df.dropna(subset=['Close'])
-        if df.empty or len(df) < 2: return None
+        
+        if len(df) < 2: return None
 
-        # 전일 종가 대비 정확한 계산 (마지막 두 거래일 비교)
+        # 마지막 두 데이터 (가장 최근 거래일 2개)
         last_c = float(df['Close'].iloc[-1])
         prev_c = float(df['Close'].iloc[-2])
-        ratio = ((last_c - prev_c) / prev_c) * 100
+        
+        # [교정된 계산 방식]
+        change_ratio = ((last_c - prev_c) / prev_c) * 100
+        
+        # 비정상적인 등락률(90% 이상 폭락/폭등)은 데이터 오류로 보고 제외
+        if abs(change_ratio) > 90: return None
             
-        return {'티커': symbol, '항목명': ASSET_NAMES.get(symbol, symbol), '현재가': format_num(last_c), '등락률': format_num(ratio)}
+        return {
+            '티커': symbol, 
+            '항목명': ASSET_NAMES.get(symbol, symbol), 
+            '현재가': last_c, 
+            '등락률': change_ratio
+        }
     except: return None
 
 async def main():
     bot = Bot(token=TOKEN)
     now = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
     
-    print(f"📡 전일 대비 데이터 수집 중...")
     results = []
     for s in ASSET_NAMES.keys():
         res = await fetch_asset_data(s)
@@ -76,9 +80,10 @@ async def main():
     file_name = f"{now.strftime('%m%d')}_종합_리포트.xlsx"
     
     with pd.ExcelWriter(file_name, engine='openpyxl') as writer:
-        df.rename(columns={'등락률':'등락률(%)'}).to_excel(writer, sheet_name='현황', index=False)
+        df.to_excel(writer, sheet_name='현황', index=False)
         ws = writer.sheets['현황']
         
+        # 스타일 설정
         yellow_fill = PatternFill(start_color='FFFF00', end_color='FFFF00', fill_type='solid')
         header_fill = PatternFill(start_color='444444', end_color='444444', fill_type='solid')
         white_font = Font(color='FFFFFF', bold=True)
@@ -100,25 +105,22 @@ async def main():
                 ticker = str(ws.cell(r, 1).value)
                 ratio_val = float(ws.cell(r, 4).value or 0)
                 
-                # [숫자 포맷팅] 소수점이 0이면 정수형태로 보이게 엑셀 서식 적용
-                # 기본 서식은 소수점 최대 2자리까지
-                ws.cell(r, 3).number_format = '#,##0.##'
-                ws.cell(r, 4).number_format = '0.##"%"'
-
-                # 화폐 기호 추가
+                # [서식] 소수점 0이면 정수 표시 서식 (0.## 사용)
+                # 현재가 서식
                 is_won = any(x in ticker for x in ['-KRW', '/KRW', 'KS11', 'KQ11']) or ticker.replace('.KS','').isdigit()
-                if is_won:
-                    ws.cell(r, 3).number_format = '"₩"#,##0.##'
-                else:
-                    ws.cell(r, 3).number_format = '"$"#,##0.##'
+                curr_fmt = '"₩"#,##0.##' if is_won else '"$"#,##0.##'
+                ws.cell(r, 3).number_format = curr_fmt
                 
-                # ±5% 이상 노란색 강조
+                # 등락률 서식 (소수점이 0이면 버림)
+                ws.cell(r, 4).number_format = '0.##"%"'
+                
+                # ±5% 이상 강조
                 if abs(ratio_val) >= 5:
                     for c in range(1, 5): ws.cell(r, c).fill = yellow_fill
 
     async with bot:
         await bot.send_document(CHAT_ID, open(file_name, 'rb'), 
-                               caption=f"🌍 종합 리포트 ({now.strftime('%Y-%m-%d')})\n✅ 전일 대비 계산 및 소수점 0 제거 완료")
+                               caption=f"🌍 종합 리포트 ({now.strftime('%Y-%m-%d')})\n✅ 등락률 계산 로직 전면 재교정 완료")
     if os.path.exists(file_name): os.remove(file_name)
 
 if __name__ == "__main__":
