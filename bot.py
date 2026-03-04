@@ -1,4 +1,4 @@
-import os, pandas as pd, asyncio, datetime, requests, time
+import os, pandas as pd, asyncio, datetime, requests
 from telegram import Bot
 from openpyxl.styles import Alignment, PatternFill, Font, Border, Side
 from urllib.parse import unquote
@@ -6,115 +6,109 @@ from urllib.parse import unquote
 # [설정]
 TELEGRAM_TOKEN = "8574978661:AAF5SXIgfpJlnAfN5ccSk0tJek_uSlCMBBo"
 CHAT_ID = "8564327930"
-
-# 공공데이터포털 인증키 (지수님 키)
 RAW_KEY = "3e937f2b0780c88e27c6f4cb99d5b58e69cc71cef898809e7aacb2bcabe1b438"
-# API 서버에 따라 unquote가 필요한 경우가 있어 두 가지를 대비합니다.
 SERVICE_KEY = unquote(RAW_KEY)
 
-def get_krx_all_stocks():
-    """공공데이터포털 API: 전 종목 시세를 단 1회 호출로 수집"""
-    # [최신화된 주소] 404 에러 방지용 공식 주소
+def get_official_krx():
+    """정부 API를 이용해 전 종목 최신 시세를 수집 (거래량 포함)"""
     url = 'http://apis.data.go.kr/1160100/service/GetStockSecuritiesInfoService/getStockPriceInfo'
-    
     params = {
         'serviceKey': SERVICE_KEY,
-        'numOfRows': '3000', # 전 종목 수용
+        'numOfRows': '3000',
         'pageNo': '1',
         'resultType': 'json'
     }
-
     try:
         response = requests.get(url, params=params, timeout=30)
-        
-        if response.status_code != 200:
-            print(f"🚨 서버 응답 에러: {response.status_code}")
-            # 404나 500 에러 발생 시 키를 unquote 없이 시도 (예외 처리)
-            params['serviceKey'] = RAW_KEY
-            response = requests.get(url, params=params, timeout=30)
-            if response.status_code != 200: return None
-            
-        res_data = response.json()
-        
-        if 'response' in res_data and 'body' in res_data['response']:
-            items_data = res_data['response']['body']['items'].get('item', [])
-            return pd.DataFrame(items_data)
-        else:
-            print(f"🚨 데이터 구조 오류: {res_data.get('header', {}).get('resultMsg')}")
-            return None
-            
-    except Exception as e:
-        print(f"🚨 API 호출 예외: {e}")
-        return None
+        items = response.json()['response']['body']['items'].get('item', [])
+        return pd.DataFrame(items)
+    except:
+        params['serviceKey'] = RAW_KEY
+        response = requests.get(url, params=params, timeout=30)
+        items = response.json()['response']['body']['items'].get('item', [])
+        return pd.DataFrame(items)
 
 async def main():
     bot = Bot(token=TELEGRAM_TOKEN)
-    now = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
+    now = datetime.datetime.now()
     
-    print("📡 [정부 공식 데이터] 전 종목 전수조사 시작...")
-    df_raw = get_krx_all_stocks()
+    print("📡 거래량 포함 데이터 수집 중...")
+    df_raw = get_official_krx()
     
-    if df_raw is None or df_raw.empty:
-        print("❌ 데이터를 가져오지 못했습니다. (API 키 승인 대기 또는 주소 확인)")
-        return
+    if df_raw.empty: return
 
-    # 1. 데이터 정제
+    # 1. 데이터 정리 및 한글 항목명 변경 (거래량 추가)
     df = pd.DataFrame()
-    df['Code'] = df_raw['srtnCd']
-    df['Name'] = df_raw['itmsNm']
-    df['Market'] = df_raw['mrktCtg']
-    df['Open'] = pd.to_numeric(df_raw['mkp'], errors='coerce').fillna(0)
-    df['Close'] = pd.to_numeric(df_raw['clpr'], errors='coerce').fillna(0)
-    df['High'] = pd.to_numeric(df_raw['hipr'], errors='coerce').fillna(0)
-    df['Low'] = pd.to_numeric(df_raw['lopr'], errors='coerce').fillna(0)
-    df['Ratio'] = pd.to_numeric(df_raw['fltRt'], errors='coerce').fillna(0)
-    df['Volume'] = pd.to_numeric(df_raw['trqu'], errors='coerce').fillna(0)
+    df['시장'] = df_raw['mrktCtg']
+    df['종목명'] = df_raw['itmsNm']
+    df['현재가'] = pd.to_numeric(df_raw['clpr'])
+    df['등락(수치)'] = pd.to_numeric(df_raw['vs'])
+    df['등락률(%)'] = pd.to_numeric(df_raw['fltRt'])
+    df['거래량'] = pd.to_numeric(df_raw['trqu']) # [추가] 거래량 데이터 변환
 
-    # 2. ±5% 필터링
-    final_df = df[(df['Ratio'] >= 5) | (df['Ratio'] <= -5)]
-    final_df = final_df.sort_values('Ratio', ascending=False)
+    # 2. 통계 계산 (전 종목 기준)
+    up_count = len(df[df['등락률(%)'] > 0])
+    down_count = len(df[df['등락률(%)'] < 0])
+    even_count = len(df[df['등락률(%)'] == 0])
+    
+    # 3. ±5% 필터링 종목 준비
+    plus_5 = df[df['등락률(%)'] >= 5].sort_values('등락률(%)', ascending=False)
+    # 하락 정렬: 가장 많이 떨어진 순서 (-30%부터 보임)
+    minus_5 = df[df['등락률(%)'] <= -5].sort_values('등락률(%)', ascending=True)
 
-    # 3. 엑셀 파일 생성
-    file_name = f"{now.strftime('%m%d')}_국내증시_리포트.xlsx"
-    h_fill, f_white = PatternFill("solid", "444444"), Font(color="FFFFFF", bold=True)
-    p_red, p_ora, p_yel = PatternFill("solid", "FF0000"), PatternFill("solid", "FFCC00"), PatternFill("solid", "FFFF00")
-    border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
-
+    file_name = f"{now.strftime('%m%d')}_국내증시_전수조사.xlsx"
+    
+    # 4. 엑셀 생성 및 디자인
     with pd.ExcelWriter(file_name, engine='openpyxl') as writer:
-        for m in ['KOSPI', 'KOSDAQ']:
-            for trend in ['상승', '하락']:
-                cond = (final_df['Ratio'] > 0) if trend == '상승' else (final_df['Ratio'] < 0)
-                sub = final_df[(final_df['Market'] == m) & cond].drop(columns=['Market'])
-                
-                sheet_name = f"{m}_{trend}"
-                sub.to_excel(writer, sheet_name=sheet_name, index=False)
-                ws = writer.sheets[sheet_name]
+        plus_5.to_excel(writer, sheet_name='급상승(5%↑)', index=False)
+        minus_5.to_excel(writer, sheet_name='급하락(5%↓)', index=False)
+        
+        for sheet in ['급상승(5%↑)', '급하락(5%↓)']:
+            ws = writer.sheets[sheet]
+            header_fill = PatternFill("solid", "444444")
+            white_font = Font(color="FFFFFF", bold=True)
+            border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
 
-                # 디자인 입히기
-                for cell in ws[1]:
-                    cell.fill, cell.font, cell.alignment, cell.border = h_fill, f_white, Alignment(horizontal='center'), border
-                
-                for r in range(2, ws.max_row + 1):
-                    ratio_val = abs(float(ws.cell(r, 7).value or 0))
-                    for c in range(1, 9):
-                        cell = ws.cell(r, c)
-                        cell.alignment, cell.border = Alignment(horizontal='center'), border
-                        if c in [3,4,5,6,8]: cell.number_format = '#,##0'
-                        if c == 7: cell.number_format = '0.00'
-                        if c == 2:
-                            if ratio_val >= 28: cell.fill, cell.font = p_red, f_white
-                            elif ratio_val >= 20: cell.fill = p_ora
-                            elif ratio_val >= 10: cell.fill = p_yel
-                ws.column_dimensions['B'].width = 18
+            # 열 너비 설정 (종목명 짤림 방지 및 거래량 칸 확보)
+            ws.column_dimensions['A'].width = 10 # 시장
+            ws.column_dimensions['B'].width = 28 # 종목명 (충분히 확장)
+            ws.column_dimensions['C'].width = 15 # 현재가
+            ws.column_dimensions['D'].width = 12 # 등락(수치)
+            ws.column_dimensions['E'].width = 12 # 등락률(%)
+            ws.column_dimensions['F'].width = 18 # 거래량
 
-    # 4. 텔레그램 발송
+            for row in ws.iter_rows(min_row=1, max_row=ws.max_row):
+                for cell in row:
+                    cell.alignment = Alignment(horizontal='center', vertical='center')
+                    cell.border = border
+                    if cell.row == 1:
+                        cell.fill, cell.font = header_fill, white_font
+                    
+                    # [포맷팅] 현재가, 수치, 거래량에 천 단위 콤마 추가
+                    if cell.column in [3, 4, 6]:
+                        cell.number_format = '#,##0'
+                    # 등락률 소수점 표시
+                    if cell.column == 5:
+                        cell.number_format = '0.00'
+
+    # 5. 텔레그램 메시지 발송
+    msg = (
+        f"📅 {now.strftime('%Y-%m-%d')} 국장 전수조사\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"📊 전종목 등락 요약\n"
+        f"  • 상승 🔺: {up_count}개\n"
+        f"  • 하락 🔻: {down_count}개\n"
+        f"  • 보합 ➖: {even_count}개\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"🔥 급변동 (±5% 이상)\n"
+        f"  • 급상승 🚀: {len(plus_5)}개\n"
+        f"  • 급하락 📉: {len(minus_5)}개\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"✅ 거래량 항목 추가 및 정렬 완료"
+    )
+
     async with bot:
-        msg = (f"📅 {now.strftime('%Y-%m-%d')} 국내증시 리포트\n\n"
-               f"📊 조사대상: {len(df)}개 전 종목\n"
-               f"⚡ 변동폭(5%↑↓): {len(final_df)}개\n\n"
-               f"✅ 유령 번호 없음 / 정부 데이터 기반")
-        with open(file_name, 'rb') as f:
-            await bot.send_document(CHAT_ID, f, caption=msg)
+        await bot.send_document(CHAT_ID, open(file_name, 'rb'), caption=msg)
     
     if os.path.exists(file_name): os.remove(file_name)
 
