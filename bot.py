@@ -1,7 +1,6 @@
 import os, pandas as pd, asyncio, datetime, requests, time
 from telegram import Bot
 from openpyxl.styles import Alignment, PatternFill, Font, Border, Side
-from openpyxl.utils import get_column_letter  # 에러 해결을 위해 추가
 from urllib.parse import unquote
 
 # [1. 설정 정보]
@@ -13,9 +12,7 @@ SERVICE_KEY = unquote(RAW_KEY)
 def get_official_data(target_date=None):
     url = 'http://apis.data.go.kr/1160100/service/GetStockSecuritiesInfoService/getStockPriceInfo'
     params = {'serviceKey': SERVICE_KEY, 'numOfRows': '4000', 'resultType': 'json'}
-    if target_date:
-        params['basDt'] = target_date.replace('-', '')
-
+    if target_date: params['basDt'] = target_date.replace('-', '')
     try:
         res = requests.get(url, params=params, timeout=30).json()
         items = res['response']['body']['items'].get('item', [])
@@ -24,8 +21,7 @@ def get_official_data(target_date=None):
             res = requests.get(url, params=params, timeout=30).json()
             items = res['response']['body']['items'].get('item', [])
         return pd.DataFrame(items)
-    except:
-        return pd.DataFrame()
+    except: return pd.DataFrame()
 
 async def main():
     bot = Bot(token=TELEGRAM_TOKEN)
@@ -35,8 +31,8 @@ async def main():
     df = pd.DataFrame()
     analysis_info = ""
 
-    # 1. 요일별 데이터 수집
-    if day_of_week == 0: # 월요일 아침 (주간 평균)
+    # 1. 데이터 수집 (어제/지난주 데이터 탐색)
+    if day_of_week == 0: 
         mode_name = "주간평균리포트"
         weekly_dfs = []
         for i in range(3, 8):
@@ -46,91 +42,104 @@ async def main():
                 for col in ['mkp', 'clpr', 'lopr', 'hipr', 'fltRt', 'trqu']:
                     df_day[col] = pd.to_numeric(df_day[col], errors='coerce').fillna(0)
                 weekly_dfs.append(df_day)
-        
         if weekly_dfs:
             full_df = pd.concat(weekly_dfs)
             df = full_df.groupby(['itmsNm', 'mrktCtg', 'srtnCd']).agg({
-                'mkp': 'first', 'clpr': 'last', 'lopr': 'min', 'hipr': 'max', 
-                'fltRt': 'mean', 'trqu': 'mean'
+                'mkp': 'first', 'clpr': 'last', 'lopr': 'min', 'hipr': 'max', 'fltRt': 'mean', 'trqu': 'mean'
             }).reset_index()
             df.columns = ['종목명', '시장', '종목코드', '시가', '종가', '저가', '고가', '등락률(%)', '거래량']
             analysis_info = f"지난주 평균 ({(now - datetime.timedelta(days=7)).strftime('%m%d')}~{(now - datetime.timedelta(days=3)).strftime('%m%d')})"
-    
-    else: # 화~토 아침 (일일 마감)
+    else:
         mode_name = "일일마감리포트"
         for i in range(1, 8):
             search_date = (now - datetime.timedelta(days=i)).strftime('%Y%m%d')
             raw = get_official_data(search_date)
             if not raw.empty:
                 df = pd.DataFrame()
-                df['시장'] = raw['mrktCtg']; df['종목코드'] = raw['srtnCd']; df['종목명'] = raw['itmsNm']
-                df['시가'] = pd.to_numeric(raw['mkp']).fillna(0); df['종가'] = pd.to_numeric(raw['clpr']).fillna(0)
-                df['저가'] = pd.to_numeric(raw['lopr']).fillna(0); df['고가'] = pd.to_numeric(raw['hipr']).fillna(0)
+                df['종목명'] = raw['itmsNm'] # A열: 종목명 (강조 대상)
+                df['시장'] = raw['mrktCtg']
+                df['종목코드'] = raw['srtnCd']
+                df['시가'] = pd.to_numeric(raw['mkp']).fillna(0)
+                df['종가'] = pd.to_numeric(raw['clpr']).fillna(0)
+                df['저가'] = pd.to_numeric(raw['lopr']).fillna(0)
+                df['고가'] = pd.to_numeric(raw['hipr']).fillna(0)
                 df['등락률(%)'] = pd.to_numeric(raw['fltRt']).fillna(0)
-                df['거래량'] = pd.to_numeric(raw['trqu']).fillna(0)
+                df['거래량'] = pd.to_numeric(raw['trqu']).fillna(0) # I열: 거래량
                 analysis_info = f"마감 기준일: {search_date}"
                 break
             time.sleep(0.1)
 
     if df.empty: return
 
-    # 2. 시트 분류
-    def filter_data(market, is_up):
-        m_cond = df['시장'].str.contains(market)
-        r_cond = (df['등락률(%)'] >= 5) if is_up else (df['등락률(%)'] <= -5)
-        return df[m_cond & r_cond].copy().sort_values('등락률(%)', ascending=not is_up)
-
-    sheets_data = {
-        '코스피_상승': filter_data('KOSPI', True), '코스피_하락': filter_data('KOSPI', False),
-        '코스닥_상승': filter_data('KOSDAQ', True), '코스닥_하락': filter_data('KOSDAQ', False)
-    }
-
-    # 3. 엑셀 생성 및 디자인
+    # 2. 엑셀 생성
     file_name = f"{now.strftime('%m%d')}_{mode_name}.xlsx"
-    header_fill = PatternFill("solid", fgColor="444444")
-    font_white = Font(color="FFFFFF", bold=True)
-    colors = {'red': PatternFill("solid", "FF0000"), 'orange': PatternFill("solid", "FFCC00"), 'yellow': PatternFill("solid", "FFFF00")}
+    
+    # 스타일 정의
+    header_fill = PatternFill(start_color="444444", end_color="444444", fill_type="solid")
+    font_white_bold = Font(color="FFFFFF", bold=True)
+    colors = {
+        'red': PatternFill(start_color="FF0000", end_color="FF0000", fill_type="solid"),
+        'orange': PatternFill(start_color="FFCC00", end_color="FFCC00", fill_type="solid"),
+        'yellow': PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+    }
     border = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
+    center_align = Alignment(horizontal='center', vertical='center')
 
     with pd.ExcelWriter(file_name, engine='openpyxl') as writer:
-        for s_name, data in sheets_data.items():
-            data.to_excel(writer, sheet_name=s_name, index=False)
-            ws = writer.sheets[s_name]
-            
-            # [수정] 고정 열 너비 설정 (A: 종목명, I: 거래량)
-            col_widths = {'A': 30, 'B': 12, 'C': 12, 'D': 15, 'E': 15, 'F': 15, 'G': 15, 'H': 12, 'I': 25}
-            for col, width in col_widths.items():
-                ws.column_dimensions[col].width = width
+        for market in ['KOSPI', 'KOSDAQ']:
+            for is_up in [True, False]:
+                sheet_label = f"{market}_{'상승' if is_up else '하락'}"
+                m_cond = df['시장'].str.contains(market)
+                r_cond = (df['등락률(%)'] >= 5) if is_up else (df['등락률(%)'] <= -5)
+                sub_df = df[m_cond & r_cond].copy().sort_values('등락률(%)', ascending=not is_up)
+                
+                sub_df.to_excel(writer, sheet_name=sheet_label, index=False)
+                ws = writer.sheets[sheet_label]
 
-            for r in range(1, ws.max_row + 1):
-                for c in range(1, 10):
-                    cell = ws.cell(r, c)
-                    cell.alignment = Alignment(horizontal='center', vertical='center')
-                    cell.border = border
-                    if r == 1:
-                        cell.fill, cell.font = header_fill, font_white
-                    else:
-                        if c in [4, 5, 6, 7, 9]: cell.number_format = '#,##0'
-                        if c == 8: # 등락률에 따른 종목명(A열) 색상 강조
-                            cell.number_format = '0.00'
-                            val = abs(float(cell.value or 0))
-                            target_cell = ws.cell(r, 1) 
-                            if val >= 25: target_cell.fill, target_cell.font = colors['red'], font_white
-                            elif val >= 20: target_cell.fill = colors['orange']
-                            elif val >= 10: target_cell.fill = colors['yellow']
+                # [디자인 강제 적용]
+                # 1. 열 너비 설정 (A: 종목명 30, I: 거래량 25)
+                ws.column_dimensions['A'].width = 30
+                ws.column_dimensions['B'].width = 12
+                ws.column_dimensions['C'].width = 12
+                for col in ['D','E','F','G']: ws.column_dimensions[col].width = 15
+                ws.column_dimensions['H'].width = 12
+                ws.column_dimensions['I'].width = 25 # 거래량 25 고정
 
-    # 4. 전송 및 메시지
-    total_up = len(sheets_data['코스피_상승']) + len(sheets_data['코스닥_상승'])
-    total_down = len(sheets_data['코스피_하락']) + len(sheets_data['코스닥_하락'])
+                # 2. 셀 전체 순회하며 스타일 입히기
+                for r_idx, row in enumerate(ws.iter_rows(min_row=1, max_row=ws.max_row, min_col=1, max_col=9), 1):
+                    for c_idx, cell in enumerate(row, 1):
+                        cell.border = border
+                        cell.alignment = center_align
+                        
+                        if r_idx == 1: # 헤더 스타일
+                            cell.fill = header_fill
+                            cell.font = font_white_bold
+                        else: # 데이터 영역
+                            # 천 단위 콤마
+                            if c_idx in [4, 5, 6, 7, 9]: cell.number_format = '#,##0'
+                            if c_idx == 8: # 등락률 소수점
+                                cell.number_format = '0.00'
+                                val = abs(float(cell.value or 0))
+                                name_cell = ws.cell(row=r_idx, column=1) # A열(종목명) 색칠
+                                if val >= 25: 
+                                    name_cell.fill, name_cell.font = colors['red'], font_white_bold
+                                elif val >= 20: 
+                                    name_cell.fill = colors['orange']
+                                elif val >= 10: 
+                                    name_cell.fill = colors['yellow']
+
+    # 4. 텔레그램 전송
+    total_up = len(df[df['등락률(%)'] >= 5])
+    total_down = len(df[df['등락률(%)'] <= -5])
+    
+    msg = (f"📊 모드: {mode_name}\n"
+           f"🔍 {analysis_info}\n\n"
+           f"📈 상승(5%↑): {total_up}개\n"
+           f"📉 하락(5%↓): {total_down}개\n"
+           f"💡 🟡10%↑ 🟠20%↑ 🔴25%↑")
 
     async with bot:
-        msg = (f"📊 모드: {mode_name}\n"
-               f"🔍 {analysis_info}\n\n"
-               f"📈 상승(5%↑): {total_up}개\n"
-               f"📉 하락(5%↓): {total_down}개\n"
-               f"💡 🟡10%↑ 🟠20%↑ 🔴25%↑")
         await bot.send_document(CHAT_ID, open(file_name, 'rb'), caption=msg)
-    
     if os.path.exists(file_name): os.remove(file_name)
 
 if __name__ == "__main__":
