@@ -26,59 +26,72 @@ def get_official_data(target_date=None):
 async def main():
     bot = Bot(token=TELEGRAM_TOKEN)
     now = datetime.datetime.utcnow() + datetime.timedelta(hours=9)
-    day_of_week = now.weekday() 
+    day_of_week = now.weekday() # 0:월, 1:화, ..., 5:토, 6:일
 
     df = pd.DataFrame()
     analysis_info = ""
+    mode_name = ""
 
-    # 1. 월요일: 주간평균리포트 (기존 로직 유지)
-    if day_of_week == 0: 
+    # [요일별 로직 분기]
+    # 1. 일요일 (6): 주간평균리포트 (월~금 데이터 요약)
+    if day_of_week == 6: 
         mode_name = "주간평균리포트"
         weekly_dfs = []
-        for i in range(3, 8): # 지난주 월~금
+        # 지난주 월(6일전)~금(2일전) 데이터를 수집
+        for i in range(2, 7):
             target_dt = (now - datetime.timedelta(days=i)).strftime('%Y%m%d')
             df_day = get_official_data(target_dt)
-            if not df_day.empty:
+            if not df_day.empty and len(df_day) > 500:
                 for col in ['mkp', 'clpr', 'lopr', 'hipr', 'fltRt', 'trqu']:
                     df_day[col] = pd.to_numeric(df_day[col], errors='coerce').fillna(0)
                 weekly_dfs.append(df_day)
+        
         if weekly_dfs:
             full_df = pd.concat(weekly_dfs)
             df = full_df.groupby(['itmsNm', 'srtnCd', 'mrktCtg']).agg({
                 'mkp': 'first', 'clpr': 'last', 'lopr': 'min', 'hipr': 'max', 'fltRt': 'mean', 'trqu': 'mean'
             }).reset_index()
             df.columns = ['종목명', '종목코드', '시장', '시가', '종가', '저가', '고가', '등락률(%)', '거래량']
-            analysis_info = "기간: 지난주 월요일 ~ 금요일"
-
-    # 2. 화~일: 일일마감리포트 (날짜 고정 로직 적용)
-    else:
-        mode_name = "일일마감리포트"
-        # 어제 날짜로 고정 (주말 제외 로직은 공공데이터가 알아서 데이터 없음으로 반환)
-        search_date = (now - datetime.timedelta(days=1)).strftime('%Y%m%d')
-        print(f"📡 어제({search_date}) 데이터 조회 시도...")
-        raw = get_official_data(search_date)
-        
-        # 데이터가 없으면 3월 3일로 넘어가지 않고 여기서 중단!
-        if raw.empty or len(raw) < 500:
-            async with bot:
-                await bot.send_message(CHAT_ID, f"⚠️ 국장 알림: {search_date} 데이터가 공공데이터 서버에 아직 없습니다. (업데이트 대기 중)")
+            analysis_info = "기간: 지난주 월요일 ~ 금요일 (평균)"
+        else:
+            print("주간 데이터를 찾을 수 없습니다.")
             return
 
-        df = pd.DataFrame()
-        df['종목코드'] = raw['srtnCd']
-        df['종목명'] = raw['itmsNm']
-        df['시가'] = pd.to_numeric(raw['mkp']).fillna(0).astype(int)
-        df['종가'] = pd.to_numeric(raw['clpr']).fillna(0).astype(int)
-        df['저가'] = pd.to_numeric(raw['lopr']).fillna(0).astype(int)
-        df['고가'] = pd.to_numeric(raw['hipr']).fillna(0).astype(int)
-        df['등락률(%)'] = pd.to_numeric(raw['fltRt']).fillna(0).astype(float)
-        df['거래량'] = pd.to_numeric(raw['trqu']).fillna(0).astype(int)
-        df['시장'] = raw['mrktCtg']
-        analysis_info = f"마감 기준일: {search_date}"
+    # 2. 화(1) ~ 토(5): 일일마감리포트 (어제 데이터 기준)
+    elif 1 <= day_of_week <= 5:
+        mode_name = "일일마감리포트"
+        found = False
+        # 어제(1일전)부터 혹시 몰라 3일전까지 탐색 (공공데이터 지연 대비)
+        for i in range(1, 4):
+            search_date = (now - datetime.timedelta(days=i)).strftime('%Y%m%d')
+            raw = get_official_data(search_date)
+            if not raw.empty and len(raw) > 500:
+                df = pd.DataFrame()
+                df['종목코드'] = raw['srtnCd']
+                df['종목명'] = raw['itmsNm']
+                df['시가'] = pd.to_numeric(raw['mkp']).fillna(0).astype(int)
+                df['종가'] = pd.to_numeric(raw['clpr']).fillna(0).astype(int)
+                df['저가'] = pd.to_numeric(raw['lopr']).fillna(0).astype(int)
+                df['고가'] = pd.to_numeric(raw['hipr']).fillna(0).astype(int)
+                df['등락률(%)'] = pd.to_numeric(raw['fltRt']).fillna(0).astype(float)
+                df['거래량'] = pd.to_numeric(raw['trqu']).fillna(0).astype(int)
+                df['시장'] = raw['mrktCtg']
+                analysis_info = f"마감 기준일: {search_date}"
+                found = True
+                break
+        if not found:
+            async with bot:
+                await bot.send_message(CHAT_ID, "⚠️ 국장 데이터가 아직 업데이트되지 않았습니다.")
+            return
+    
+    # 3. 월요일(0) 또는 기타: 리포트 미발송
+    else:
+        print("오늘은 리포트를 생성하지 않는 요일입니다.")
+        return
 
     if df.empty: return
 
-    # [이후 엑셀 생성 및 스타일링 - 지수님 요청 사항 100% 반영]
+    # [엑셀 생성 및 스타일링 - 지수님 요청 디자인]
     target_cols = ['종목코드', '종목명', '시가', '종가', '저가', '고가', '등락률(%)', '거래량']
     file_name = f"{now.strftime('%m%d')}_{mode_name}.xlsx"
     
